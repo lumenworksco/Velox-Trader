@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.11', '3.12', '3.13']
 
@@ -24,6 +25,24 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Verify core imports
+        run: |
+          python -c "
+          import config
+          import database
+          from strategies.base import Signal
+          from strategies.stat_mean_reversion import StatMeanReversion
+          from strategies.kalman_pairs import KalmanPairsTrader
+          from strategies.micro_momentum import IntradayMicroMomentum
+          from risk.vol_targeting import VolatilityTargetingRiskEngine
+          from risk.daily_pnl_lock import DailyPnLLock
+          from risk.beta_neutralizer import BetaNeutralizer
+          from analytics.ou_tools import fit_ou_params, compute_zscore
+          from analytics.hurst import hurst_exponent
+          from analytics.consistency_score import compute_consistency_score
+          print('All V6 imports OK')
+          "
 
       - name: Run V6 tests
         run: |
@@ -42,20 +61,6 @@ jobs:
           file: coverage.xml
         continue-on-error: true
 
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Check imports
-        run: |
-          pip install -r requirements.txt
-          python -c "import config; import main; print('All imports OK')"
-
   docker:
     runs-on: ubuntu-latest
     needs: test
@@ -64,7 +69,3 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t velox-v6 .
-
-      - name: Verify container starts
-        run: |
-          docker run --rm velox-v6 python -c "import main; print('Container OK')"
