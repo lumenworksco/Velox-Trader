@@ -7,6 +7,7 @@ from risk.beta_neutralizer import BetaNeutralizer
 
 # V8 risk modules
 from risk.kelly import KellyEngine
+from risk.portfolio_heat import PortfolioHeatTracker
 
 # Backward compatibility: re-export RiskManager, TradeRecord, VIX functions
 from risk.risk_manager import (
@@ -24,6 +25,7 @@ __all__ = [
     "BetaNeutralizer",
     # V8
     "KellyEngine",
+    "PortfolioHeatTracker",
     # V1-V5 backward compat
     "RiskManager",
     "TradeRecord",

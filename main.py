@@ -776,7 +776,7 @@ def main():
         try:
             db_pairs = database.get_active_kalman_pairs()
             kalman_pairs.active_pairs = [
-                (p['symbol_a'], p['symbol_b']) for p in db_pairs
+                (p['symbol1'], p['symbol2']) for p in db_pairs
             ]
             console.print(f"[green]Kalman pairs loaded from DB: {len(kalman_pairs.active_pairs)} pairs[/green]")
         except Exception as e:
