@@ -1,12 +1,11 @@
 """Backtesting engine — simulate strategies on historical data."""
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from rich.console import Console
 from rich.table import Table
 
@@ -98,7 +97,7 @@ def simulate_orb(data: dict[str, pd.DataFrame], initial_capital: float = 100000)
 
             # Range quality filter
             range_pct = orb_range / ((orb_high + orb_low) / 2)
-            if range_pct > config.MAX_ORB_RANGE_PCT:
+            if range_pct > config.ORB_MAX_RANGE_PCT:
                 continue
 
             # Look for breakout in subsequent bars
@@ -108,8 +107,8 @@ def simulate_orb(data: dict[str, pd.DataFrame], initial_capital: float = 100000)
                 if bar["close"] > orb_high and bar["volume"] > 0:
                     # Breakout signal
                     entry = orb_high * (1 + config.BACKTEST_SLIPPAGE)
-                    tp = entry + config.ORB_TAKE_PROFIT_MULT * orb_range
-                    sl = entry - config.ORB_STOP_LOSS_MULT * orb_range
+                    tp = entry + config.ORB_TP_MULT * orb_range
+                    sl = entry - config.ORB_SL_MULT * orb_range
 
                     qty = max(1, int((portfolio * config.RISK_PER_TRADE_PCT) / abs(entry - sl)))
                     commission = qty * config.BACKTEST_COMMISSION * 2
@@ -369,7 +368,7 @@ def quick_recent_backtest(strategy: str, days: int = 30) -> dict:
     Returns dict with: sharpe_ratio, win_rate, total_trades, total_return
     """
     try:
-        symbols = config.FOCUS_LIST[:10]  # Small set for speed
+        symbols = config.STANDARD_SYMBOLS[:10]  # Small set for speed
 
         import yfinance as yf
         end = datetime.now()

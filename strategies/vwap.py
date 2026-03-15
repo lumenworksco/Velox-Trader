@@ -8,10 +8,8 @@ Exit:  Handled by ExitManager (time stops, trailing stops, scaled TP)
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
-import numpy as np
-import pandas as pd
 import pandas_ta as ta
 from alpaca.data.timeframe import TimeFrame
 
@@ -78,7 +76,7 @@ class VWAPStrategy:
                     continue
                 rsi = rsi_series.iloc[-1]
 
-                # V7: OU z-score confirmation on intraday bars
+                # OU z-score confirmation on intraday bars
                 ou_zscore = 0.0
                 try:
                     close = bars["close"]
@@ -89,7 +87,7 @@ class VWAPStrategy:
                     logger.debug(f"OU fit failed for {symbol}: {e}")
                     pass  # OU fit failure is non-fatal — proceed without
 
-                # V7: Bid-ask spread check (skip wide-spread stocks)
+                # Bid-ask spread check (skip wide-spread stocks)
                 try:
                     snap = get_snapshot(symbol)
                     if snap and snap.latest_quote:
@@ -106,7 +104,7 @@ class VWAPStrategy:
                 prev_bar = bars.iloc[-2]
                 curr_bar = bars.iloc[-1]
 
-                # Volume ratio check (V7: relaxed from 1.2 to 0.8)
+                # Volume ratio check
                 vol_ratio = 1.0
                 if len(bars) >= 20:
                     avg_vol = bars["volume"].iloc[-20:].mean()
@@ -117,10 +115,10 @@ class VWAPStrategy:
                 if (prev_bar["low"] <= lower
                         and curr_bar["close"] > lower
                         and rsi < config.VWAP_RSI_OVERSOLD
-                        and ou_zscore < -config.VWAP_OU_ZSCORE_MIN  # V7: OU also says cheap
-                        and vol_ratio > config.VWAP_VOLUME_RATIO):  # V7: relaxed volume check
+                        and ou_zscore < -config.VWAP_OU_ZSCORE_MIN
+                        and vol_ratio > config.VWAP_VOLUME_RATIO):
 
-                    # V5: Confirmation bar check
+                    # Confirmation bar check
                     if config.VWAP_CONFIRMATION_BARS >= 2 and len(bars) >= 3:
                         bar_2ago = bars.iloc[-3]
                         if not (bar_2ago["low"] <= lower and prev_bar["close"] > prev_bar["open"]):
@@ -134,7 +132,7 @@ class VWAPStrategy:
                     if abs(entry - stop_loss) < min_stop:
                         stop_loss = entry - min_stop
 
-                    # V7: Use tighter of VWAP and OU targets
+                    # Use tighter of VWAP and OU targets
                     vwap_target = vwap
                     if ou and ou_zscore < -1.5:
                         ou_target = ou['mu']
@@ -162,7 +160,7 @@ class VWAPStrategy:
                     and prev_bar["high"] >= upper
                     and curr_bar["close"] < upper
                     and rsi > config.VWAP_RSI_OVERBOUGHT
-                    and ou_zscore > config.VWAP_OU_ZSCORE_MIN  # V7: OU also says expensive
+                    and ou_zscore > config.VWAP_OU_ZSCORE_MIN
                     and day_move > 0.01
                     and vol_ratio > config.VWAP_VOLUME_RATIO
                 ):
@@ -179,7 +177,7 @@ class VWAPStrategy:
                     if abs(stop_loss - entry) < min_stop:
                         stop_loss = entry + min_stop
 
-                    # V7: Use tighter of VWAP and OU targets
+                    # Use tighter of VWAP and OU targets
                     vwap_target = vwap
                     if ou and ou_zscore > 1.5:
                         ou_target = ou['mu']
