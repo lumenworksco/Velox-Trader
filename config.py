@@ -131,9 +131,10 @@ SECTOR_GROUPS = {
 # ============================================================
 
 STRATEGY_ALLOCATIONS = {
-    'STAT_MR': 0.50,
+    'STAT_MR': 0.40,
     'VWAP': 0.20,
     'KALMAN_PAIRS': 0.20,
+    'PEAD': 0.10,
     'ORB': 0.05,
     'MICRO_MOM': 0.05,
 }
@@ -284,6 +285,16 @@ DYNAMIC_ALLOCATION = os.getenv("DYNAMIC_ALLOCATION", "true") == "true"
 ALLOCATION_LOOKBACK_DAYS = 20      # Rolling window for Sharpe-based allocation
 ALLOCATION_MIN_WEIGHT = 0.10       # Min 10% per strategy
 
+# --- Adaptive Strategy Allocation ---
+ADAPTIVE_ALLOCATION_ENABLED = True
+ADAPTIVE_MIN_WEIGHT = 0.03
+ADAPTIVE_MAX_WEIGHT = 0.60
+ADAPTIVE_MAX_DAILY_CHANGE = 0.10
+ADAPTIVE_SORTINO_LOOKBACK = 30    # trades
+ADAPTIVE_SORTINO_WEIGHT = 0.40
+ADAPTIVE_REGIME_WEIGHT = 0.30
+ADAPTIVE_CORRELATION_WEIGHT = 0.30
+
 # --- Monte Carlo Tail Risk ---
 MONTE_CARLO_ENABLED = True
 MONTE_CARLO_SIMULATIONS = 10000
@@ -361,6 +372,12 @@ OBV_DIVERGENCE_ENABLED = True
 OBV_CONFIDENCE_BOOST = 0.1
 OBV_CONFIDENCE_PENALTY = -0.1
 OBV_LOOKBACK = 20
+
+# --- Cross-Asset Signals ---
+CROSS_ASSET_ENABLED = True
+CROSS_ASSET_UPDATE_INTERVAL = 900   # 15 minutes
+CROSS_ASSET_FLIGHT_REDUCTION = 0.30  # Reduce to 30% sizing on flight-to-safety
+CROSS_ASSET_CREDIT_STRESS_THRESHOLD = 0.70
 
 # --- Data Quality ---
 DATA_QUALITY_ENABLED = True

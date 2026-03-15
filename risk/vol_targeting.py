@@ -26,10 +26,15 @@ class VolatilityTargetingRiskEngine:
         self.max_vol = config.VOL_TARGET_MAX
         self._last_scalar = 1.0
         self._kelly_engine = None
+        self._adaptive_weights: dict[str, float] | None = None
 
     def set_kelly_engine(self, kelly_engine):
         """Set the Kelly engine for dynamic risk sizing."""
         self._kelly_engine = kelly_engine
+
+    def set_adaptive_weights(self, weights: dict[str, float]):
+        """Store current adaptive allocation weights for position sizing."""
+        self._adaptive_weights = dict(weights)
 
     def compute_vol_scalar(
         self,
@@ -118,7 +123,12 @@ class VolatilityTargetingRiskEngine:
         position_value *= vol_scalar
 
         # 4. Apply strategy allocation weight
-        allocation = config.STRATEGY_ALLOCATIONS.get(strategy, 0.33)
+        if (getattr(config, "ADAPTIVE_ALLOCATION_ENABLED", False)
+                and self._adaptive_weights
+                and strategy in self._adaptive_weights):
+            allocation = self._adaptive_weights[strategy]
+        else:
+            allocation = config.STRATEGY_ALLOCATIONS.get(strategy, 0.33)
         # Normalize: if equal weight would be 0.33, scale by allocation / 0.33
         position_value *= allocation / 0.33
 
