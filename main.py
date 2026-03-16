@@ -22,7 +22,7 @@ import database
 import analytics as analytics_mod
 from data import (
     verify_connectivity, verify_data_feed, get_account, get_clock,
-    get_positions, get_snapshot, get_snapshots,
+    get_positions, get_snapshot, get_snapshots, get_filled_exit_price,
 )
 from strategies.base import Signal
 from strategies.regime import MarketRegime
@@ -221,6 +221,8 @@ def startup_checks() -> dict:
 # Position / broker sync
 # ---------------------------------------------------------------------------
 
+_broker_miss_counts: dict[str, int] = {}  # Track consecutive misses before closing
+
 def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None):
     """Sync open trades with actual broker positions.
 
@@ -228,8 +230,9 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
     known market price for accurate P&L instead of using entry_price (which
     produced 0 P&L for all broker_sync exits).
 
-    Unknown broker positions (ones we never opened) are logged as warnings
-    and optionally auto-closed if CLOSE_UNKNOWN_POSITIONS=True.
+    FIXED in V9: Require 2 consecutive misses before closing a position
+    (prevents false closes from transient API issues). Also re-adopts
+    broker positions that we previously traded but lost track of.
     """
     try:
         broker_positions = {p.symbol: p for p in get_positions()}
@@ -238,40 +241,84 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
         return
 
     # Close our DB records for positions the broker no longer has
+    # Require 2 consecutive misses to avoid transient API issues
     for symbol in list(risk.open_trades.keys()):
         if symbol not in broker_positions:
+            _broker_miss_counts[symbol] = _broker_miss_counts.get(symbol, 0) + 1
+            if _broker_miss_counts[symbol] < 2:
+                logger.info(f"Position {symbol} missing from broker (miss {_broker_miss_counts[symbol]}/2) — will confirm next sync")
+                continue
+
             trade = risk.open_trades[symbol]
 
-            # Fetch last known price for accurate P&L
-            try:
-                snap = get_snapshot(symbol)
-                exit_price = float(snap.latest_trade.price) if snap and snap.latest_trade else trade.entry_price
-            except Exception:
-                exit_price = trade.entry_price
+            # V9: First try to get the actual broker fill price (TP/SL leg)
+            # This is far more accurate than a market snapshot
+            exit_price = get_filled_exit_price(symbol, side=trade.side)
+            if exit_price is None:
+                # Fallback to snapshot price
+                try:
+                    snap = get_snapshot(symbol)
+                    exit_price = float(snap.latest_trade.price) if snap and snap.latest_trade else trade.entry_price
+                except Exception:
+                    exit_price = trade.entry_price
 
             risk.close_trade(symbol, exit_price, now, exit_reason="broker_sync")
-            logger.info(f"Position {symbol} no longer at broker — closed at ${exit_price:.2f} (entry ${trade.entry_price:.2f})")
+            logger.info(f"Position {symbol} confirmed gone from broker — closed at ${exit_price:.2f} (entry ${trade.entry_price:.2f})")
+            _broker_miss_counts.pop(symbol, None)
 
             if ws_monitor:
                 ws_monitor.unsubscribe(symbol)
             if notifications and config.TELEGRAM_ENABLED:
                 try:
                     notifications.notify_trade_closed(trade)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to send close notification for {symbol}: {e}")
+        else:
+            # Position found at broker — clear any miss count
+            _broker_miss_counts.pop(symbol, None)
 
-    # Warn about unknown broker positions (don't create fake records)
+    # Re-adopt broker positions we previously traded but lost track of
     our_symbols = set(risk.open_trades.keys())
     for symbol in broker_positions:
         if symbol not in our_symbols and symbol != "SPY":  # SPY may be beta hedge
             bp = broker_positions[symbol]
-            logger.warning(f"Unknown broker position: {symbol} qty={bp.qty} — not in our records")
-            if getattr(config, "CLOSE_UNKNOWN_POSITIONS", False):
-                try:
-                    close_position(symbol, reason="unknown_position_cleanup")
-                    logger.info(f"Auto-closed unknown position: {symbol}")
-                except Exception as e:
-                    logger.error(f"Failed to auto-close unknown position {symbol}: {e}")
+            qty = int(float(bp.qty))
+            avg_price = float(bp.avg_entry_price)
+
+            # Check if we recently traded this symbol (last broker_sync close)
+            recent = database.get_recent_trades(days=1)
+            was_ours = any(
+                t["symbol"] == symbol and t.get("exit_reason") == "broker_sync"
+                for t in recent
+            )
+
+            if was_ours:
+                # Re-adopt: this position was ours but got falsely closed
+                side = "buy" if qty > 0 else "sell"
+                trade = TradeRecord(
+                    symbol=symbol,
+                    strategy="re-adopted",
+                    side=side,
+                    entry_price=avg_price,
+                    entry_time=now,
+                    qty=abs(qty),
+                    take_profit=avg_price * (1.02 if side == "buy" else 0.98),
+                    stop_loss=avg_price * (0.98 if side == "buy" else 1.02),
+                    order_id="",
+                    hold_type="day",
+                )
+                risk.open_trades[symbol] = trade
+                logger.warning(f"Re-adopted broker position: {symbol} qty={qty} @ ${avg_price:.2f} (was falsely broker_sync'd)")
+                if ws_monitor:
+                    ws_monitor.subscribe(symbol)
+            else:
+                logger.warning(f"Unknown broker position: {symbol} qty={qty} — not in our records")
+                if getattr(config, "CLOSE_UNKNOWN_POSITIONS", False):
+                    try:
+                        close_position(symbol, reason="unknown_position_cleanup")
+                        logger.info(f"Auto-closed unknown position: {symbol}")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-close unknown position {symbol}: {e}")
 
     try:
         account = get_account()
@@ -1694,19 +1741,18 @@ async def _async_exit_checker(
 
 
 async def _async_broker_sync(risk, ws_monitor):
-    """Async task: sync positions with broker every 60 seconds."""
+    """Async task: sync positions with broker every 60 seconds.
+
+    FIXED in V9: Always run broker sync regardless of WebSocket status.
+    The WS monitors quotes for price-based exits, but bracket order TP/SL
+    legs fire at the broker level — only broker sync detects those closes.
+    """
     while True:
         try:
             current = now_et()
             if is_market_hours(current.time()):
-                if not (ws_monitor and ws_monitor.is_connected):
-                    sync_positions_with_broker(risk, current, ws_monitor)
-                else:
-                    try:
-                        account = get_account()
-                        risk.update_equity(float(account.equity), float(account.cash))
-                    except Exception as e:
-                        logger.error(f"[async] Account update failed: {e}")
+                sync_positions_with_broker(risk, current, ws_monitor)
+
 
                 if risk.check_circuit_breaker():
                     if notifications and config.TELEGRAM_ENABLED:

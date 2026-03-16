@@ -121,6 +121,42 @@ def get_intraday_bars(symbol: str, timeframe: TimeFrame, start: datetime, end: d
     return get_bars(symbol, timeframe, start=start, end=end)
 
 
+def get_filled_exit_price(symbol: str, side: str = "buy") -> float | None:
+    """Look up the actual fill price for a recently closed position.
+
+    When a bracket order's TP or SL leg fires at the broker, the position
+    disappears. This function checks closed orders for the symbol to find
+    the actual fill price, which is more accurate than a market snapshot.
+
+    Args:
+        symbol: The stock symbol
+        side: The side of the EXIT order ("sell" for long exits, "buy" for short exits)
+    Returns:
+        The average fill price, or None if not found
+    """
+    try:
+        client = get_trading_client()
+        # Get recently closed orders for this symbol
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.CLOSED,
+            symbols=[symbol],
+            limit=10,
+        )
+        orders = client.get_orders(request)
+
+        # Find the most recent filled sell order (stop loss or take profit leg)
+        exit_side = "sell" if side == "buy" else "buy"
+        for order in orders:
+            if (order.symbol == symbol
+                    and order.side == exit_side
+                    and order.status == "filled"
+                    and order.filled_avg_price is not None):
+                return float(order.filled_avg_price)
+    except Exception as e:
+        logger.warning(f"Failed to look up fill price for {symbol}: {e}")
+    return None
+
+
 def get_snapshot(symbol: str):
     """Get latest snapshot for a symbol (latest trade, quote, bar)."""
     client = get_data_client()
