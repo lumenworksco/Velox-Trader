@@ -1,0 +1,101 @@
+# T6-002: Alertmanager configuration for Velox Trading Bot
+#
+# Routes alerts from Prometheus to Telegram (primary) and email (fallback).
+# Configure credentials via environment variables in .env:
+#   TELEGRAM_BOT_TOKEN  — Telegram bot API token
+#   TELEGRAM_CHAT_ID    — Target chat/channel ID
+#   SMTP_SMARTHOST      — SMTP relay (e.g. smtp.gmail.com:587)
+#   SMTP_FROM           — Sender address
+#   SMTP_AUTH_USERNAME   — SMTP username
+#   SMTP_AUTH_PASSWORD   — SMTP password
+#   ALERT_EMAIL_TO      — Recipient address
+
+global:
+  resolve_timeout: 5m
+
+  # SMTP defaults (used by email receiver)
+  smtp_smarthost: "${SMTP_SMARTHOST:-smtp.gmail.com:587}"
+  smtp_from: "${SMTP_FROM:-velox-alerts@example.com}"
+  smtp_auth_username: "${SMTP_AUTH_USERNAME:-}"
+  smtp_auth_password: "${SMTP_AUTH_PASSWORD:-}"
+  smtp_require_tls: true
+
+route:
+  # Default receiver
+  receiver: telegram-critical
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Critical alerts — immediate Telegram push, no grouping delay
+    - match:
+        severity: critical
+      receiver: telegram-critical
+      group_wait: 0s
+      repeat_interval: 1h
+
+    # Warning alerts — batched every 5 minutes
+    - match:
+        severity: warning
+      receiver: telegram-warning
+      group_wait: 2m
+      repeat_interval: 4h
+
+    # ML team alerts
+    - match:
+        team: ml
+      receiver: telegram-warning
+      group_wait: 5m
+      repeat_interval: 12h
+
+inhibit_rules:
+  # If critical API failure is firing, suppress the warning-level API alert
+  - source_match:
+      alertname: APIFailureRateCritical
+    target_match:
+      alertname: APIFailureRate
+    equal: ["team"]
+
+  # If scan is critically slow, suppress the warning
+  - source_match:
+      alertname: ScanLatencyCritical
+    target_match:
+      alertname: ScanLatencyHigh
+    equal: ["team"]
+
+receivers:
+  - name: telegram-critical
+    telegram_configs:
+      - bot_token: "${TELEGRAM_BOT_TOKEN}"
+        chat_id: ${TELEGRAM_CHAT_ID:-0}
+        parse_mode: HTML
+        message: |
+          🚨 <b>VELOX CRITICAL</b>
+          <b>Alert:</b> {{ .GroupLabels.alertname }}
+          <b>Severity:</b> {{ .CommonLabels.severity }}
+          {{ range .Alerts }}
+          <b>Summary:</b> {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url }}<b>Runbook:</b> {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+
+  - name: telegram-warning
+    telegram_configs:
+      - bot_token: "${TELEGRAM_BOT_TOKEN}"
+        chat_id: ${TELEGRAM_CHAT_ID:-0}
+        parse_mode: HTML
+        message: |
+          ⚠️ <b>VELOX WARNING</b>
+          <b>Alert:</b> {{ .GroupLabels.alertname }}
+          {{ range .Alerts }}
+          <b>Summary:</b> {{ .Annotations.summary }}
+          {{ end }}
+
+  - name: email-fallback
+    email_configs:
+      - to: "${ALERT_EMAIL_TO:-admin@example.com}"
+        send_resolved: true
+        headers:
+          Subject: "[VELOX {{ .CommonLabels.severity | toUpper }}] {{ .GroupLabels.alertname }}"

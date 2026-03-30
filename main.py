@@ -640,13 +640,19 @@ def main():
         except Exception as e:
             logger.debug(f"Shutdown backup failed (non-critical): {e}")
 
-        # Step 5: Stop websocket monitor
+        # Step 5: Stop websocket monitor and EDGAR monitor
         try:
             if ws_monitor:
                 ws_monitor.stop()
             console.print("[yellow]  5/6 WebSocket monitor stopped[/yellow]")
         except Exception as e:
             logger.warning(f"Shutdown step 5 (websocket) failed: {e}")
+        try:
+            if _edgar_monitor:
+                _edgar_monitor.stop()
+                console.print("[yellow]  5b/6 EDGAR monitor stopped[/yellow]")
+        except Exception as e:
+            logger.debug(f"Shutdown: EDGAR monitor stop failed: {e}")
 
         # Step 6: Flush all log handlers
         try:
@@ -853,6 +859,21 @@ def main():
     if tiered_cb:
         _ctr.register_instance("circuit_breaker", tiered_cb)
     logger.info("T2-005: Live instances registered into Container (risk_manager, vol_engine, pnl_lock, oms, circuit_breaker)")
+
+    # --- T7-003: Start EDGAR 8-K monitor ---
+    _edgar_monitor = None
+    if getattr(config, "EDGAR_MONITOR_ENABLED", False):
+        try:
+            from data.alternative.sec_filings import EdgarMonitor
+            from engine.signal_processor import set_edgar_monitor
+            _edgar_monitor = EdgarMonitor(universe=list(config.UNIVERSE))
+            set_edgar_monitor(_edgar_monitor)
+            _edgar_monitor.start()
+            features.append("EDGAR-8K")
+            v11_active += 1
+            logger.info("T7-003: EDGAR 8-K monitor started")
+        except Exception as e:
+            logger.warning(f"T7-003: EDGAR monitor init failed (fail-open): {e}")
 
     features_str = ", ".join(features)
     console.print(f"\n[bold green]Velox V11 is running. Press Ctrl+C to stop.[/bold green]")

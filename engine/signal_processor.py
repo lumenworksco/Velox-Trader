@@ -147,6 +147,20 @@ try:
 except ImportError:
     _ALPHA_AGENTS_AVAILABLE = False
 
+# T7-003: EDGAR 8-K monitor integration (fail-open)
+_edgar_monitor = None
+try:
+    from data.alternative.sec_filings import EdgarMonitor as _EdgarMonitorClass
+    _EDGAR_AVAILABLE = True
+except ImportError:
+    _EDGAR_AVAILABLE = False
+
+
+def set_edgar_monitor(monitor) -> None:
+    """Inject the EdgarMonitor instance from main.py."""
+    global _edgar_monitor
+    _edgar_monitor = monitor
+
 
 def cleanup_stale_vpin_instances(active_symbols: set[str] | None = None) -> int:
     """T1-009: Evict VPIN instances for symbols no longer in the active universe.
@@ -817,9 +831,25 @@ def _process_single_signal(
         except Exception as e:
             logger.debug("T5-012: Alpha agent check failed for %s (fail-open): %s", signal.symbol, e)
 
+    # T7-003: EDGAR 8-K filing bias multiplier (fail-open)
+    edgar_mult = 1.0
+    if _EDGAR_AVAILABLE and _edgar_monitor and getattr(config, "EDGAR_MONITOR_ENABLED", False):
+        try:
+            edgar_bias = _edgar_monitor.get_signal_bias(signal.symbol)
+            if abs(edgar_bias) > 0.1:
+                # Map bias [-1, 1] to multiplier [0.7, 1.3]
+                edgar_mult = 1.0 + 0.3 * edgar_bias
+                edgar_mult = max(0.7, min(1.3, edgar_mult))
+                logger.info(
+                    "T7-003: EDGAR bias=%.2f for %s — edgar_mult=%.2f",
+                    edgar_bias, signal.symbol, edgar_mult,
+                )
+        except Exception as e:
+            logger.debug("T7-003: EDGAR check failed for %s (fail-open): %s", signal.symbol, e)
+
     # Apply all multipliers
     # CRIT-008: Cap combined multipliers to prevent position size overflow (3x+ leverage)
-    combined_mult = news_mult * llm_mult * regime_mult * seasonality_mult * cross_asset_mult * var_mult * ml_conf_mult * vpin_mult * finbert_mult * lead_lag_mult * alpha_agent_mult
+    combined_mult = news_mult * llm_mult * regime_mult * seasonality_mult * cross_asset_mult * var_mult * ml_conf_mult * vpin_mult * finbert_mult * lead_lag_mult * alpha_agent_mult * edgar_mult
     combined_mult = min(combined_mult, 2.0)  # Hard cap at 2x base size
     qty = int(qty * combined_mult)
 

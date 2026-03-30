@@ -270,24 +270,36 @@ def _migrate_5(conn: sqlite3.Connection):
     Stores structured audit entries for order submissions, risk decisions,
     circuit breaker trips, and system events.
     """
+    # audit_log may already exist from V11.1 compliance module with a different schema.
+    # Add missing columns if they don't exist (ALTER TABLE ADD COLUMN is idempotent-safe).
     conn.execute("""
         CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
             event_type TEXT NOT NULL,
-            source TEXT NOT NULL,
-            symbol TEXT,
-            strategy TEXT,
-            details TEXT,
-            severity TEXT DEFAULT 'INFO',
-            session_id TEXT
+            actor TEXT NOT NULL DEFAULT 'system',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            signature_hash TEXT NOT NULL DEFAULT ''
         )
     """)
+    # Add V11.2 columns to existing table (ignore if already present)
+    for col_def in [
+        "source TEXT DEFAULT ''",
+        "symbol TEXT",
+        "strategy TEXT",
+        "details TEXT",
+        "severity TEXT DEFAULT 'INFO'",
+        "session_id TEXT",
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE audit_log ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_log(event_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_symbol ON audit_log(symbol)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_severity ON audit_log(severity)")
-    logger.info("T2-006: Created audit_log table with indexes")
+    logger.info("T2-006: audit_log table ready with all indexes")
 
 
 def _migrate_6(conn: sqlite3.Connection):

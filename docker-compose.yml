@@ -10,11 +10,12 @@
 #   http://localhost:8080/metrics — Prometheus metrics
 #   http://localhost:9090       — Prometheus UI
 #   http://localhost:3000       — Grafana (credentials in .env)
+#   http://localhost:9093       — Alertmanager UI
 
 services:
   velox:
     build: .
-    container_name: velox-v10
+    container_name: velox-v11
     restart: unless-stopped
     stop_grace_period: 45s
     env_file: .env
@@ -77,6 +78,7 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
       - promdata:/prometheus
     depends_on:
       - velox
@@ -85,6 +87,28 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+
+  # T6-002: Alertmanager — routes Prometheus alerts to Telegram/email
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: velox-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertdata:/alertmanager
+    env_file: .env
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   grafana:
     image: grafana/grafana:latest
@@ -109,3 +133,4 @@ volumes:
   pgdata:
   promdata:
   grafdata:
+  alertdata:

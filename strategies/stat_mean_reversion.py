@@ -326,7 +326,10 @@ class StatMeanReversion:
                             "action": "partial",
                             "reason": f"MR partial revert z={zscore:.2f}",
                         })
-                    elif zscore < -config.MR_ZSCORE_STOP:
+                    elif hasattr(trade, 'stop_loss') and trade.stop_loss and price <= trade.stop_loss:
+                        # Use the stop price stored at entry (calculated with intraday OU params)
+                        # rather than recomputing z-score with daily OU params which uses a
+                        # different sigma — this mismatch was causing stops to fire at z=-6+ instead of -2.5
                         exits.append({
                             "symbol": symbol,
                             "action": "full",
@@ -348,7 +351,7 @@ class StatMeanReversion:
                             "action": "partial",
                             "reason": f"MR partial revert z={zscore:.2f}",
                         })
-                    elif zscore > config.MR_ZSCORE_STOP:
+                    elif hasattr(trade, 'stop_loss') and trade.stop_loss and price >= trade.stop_loss:
                         exits.append({
                             "symbol": symbol,
                             "action": "full",
