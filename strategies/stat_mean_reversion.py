@@ -333,20 +333,27 @@ class StatMeanReversion:
 
                 if trade.side == "buy":
                     # Long: entered at negative z-score, want z to revert toward 0 and beyond
-                    # V11.3 T11: Scaled exits to capture mean-reversion overshoot
+                    # V11.4: Enhanced overshoot capture with momentum continuation
                     if zscore >= config.MR_ZSCORE_EXIT_PARTIAL:
-                        # z overshot past mean — take partial, set trailing stop
+                        # z overshot past mean — take partial, tighten trailing stop
                         exits.append({
                             "symbol": symbol,
                             "action": "partial",
                             "reason": f"MR overshoot partial z={zscore:.2f}",
                         })
-                        # Set trailing stop at 0.3% below current price to capture rest
+                        # V11.4: Tighter trailing stop in overshoot zone (0.2% vs 0.3%)
                         if hasattr(trade, 'stop_loss'):
-                            trail_stop = price * 0.997
+                            trail_stop = price * 0.998
                             if trade.stop_loss < trail_stop:
                                 trade.stop_loss = trail_stop
-                    elif -config.MR_ZSCORE_EXIT_FULL <= zscore <= config.MR_ZSCORE_EXIT_FULL:
+                    elif 0 < zscore < config.MR_ZSCORE_EXIT_PARTIAL:
+                        # V11.4: z crossed zero but hasn't reached overshoot threshold yet
+                        # Move stop to breakeven + small profit to lock in gains
+                        if hasattr(trade, 'stop_loss') and hasattr(trade, 'entry_price'):
+                            breakeven_plus = trade.entry_price * 1.001  # Lock 0.1% profit
+                            if trade.stop_loss < breakeven_plus:
+                                trade.stop_loss = breakeven_plus
+                    elif -config.MR_ZSCORE_EXIT_FULL <= zscore <= 0:
                         # V11.3: Changed from "full" to "partial" — take 50%, let rest ride
                         # The mean-reversion often overshoots past the mean
                         exits.append({
@@ -374,10 +381,16 @@ class StatMeanReversion:
                             "reason": f"MR overshoot partial z={zscore:.2f}",
                         })
                         if hasattr(trade, 'stop_loss'):
-                            trail_stop = price * 1.003
+                            trail_stop = price * 1.002
                             if trade.stop_loss > trail_stop:
                                 trade.stop_loss = trail_stop
-                    elif -config.MR_ZSCORE_EXIT_FULL <= zscore <= config.MR_ZSCORE_EXIT_FULL:
+                    elif -config.MR_ZSCORE_EXIT_PARTIAL < zscore < 0:
+                        # V11.4: z crossed zero but hasn't reached overshoot threshold
+                        if hasattr(trade, 'stop_loss') and hasattr(trade, 'entry_price'):
+                            breakeven_minus = trade.entry_price * 0.999
+                            if trade.stop_loss > breakeven_minus:
+                                trade.stop_loss = breakeven_minus
+                    elif 0 <= zscore <= config.MR_ZSCORE_EXIT_FULL:
                         exits.append({
                             "symbol": symbol,
                             "action": "partial",

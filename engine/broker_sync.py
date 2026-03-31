@@ -1,6 +1,7 @@
 """V10 Engine — Broker position synchronization and shadow trade management."""
 
 import logging
+import threading
 from datetime import datetime, timedelta
 
 import config
@@ -11,7 +12,9 @@ from risk import RiskManager, TradeRecord
 logger = logging.getLogger(__name__)
 
 # Track consecutive misses before closing (prevents false closes from transient API issues)
+# V11.3 P8: Protected by lock for thread safety
 _broker_miss_counts: dict[str, int] = {}
+_broker_miss_lock = threading.Lock()
 
 # Lazy-loaded optional modules
 _notifications = None
@@ -58,9 +61,11 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
     # Close DB records for positions the broker no longer has
     for symbol in list(risk.open_trades.keys()):
         if symbol not in broker_positions:
-            _broker_miss_counts[symbol] = _broker_miss_counts.get(symbol, 0) + 1
-            if _broker_miss_counts[symbol] < 2:
-                logger.info(f"Position {symbol} missing from broker (miss {_broker_miss_counts[symbol]}/2) — will confirm next sync")
+            with _broker_miss_lock:
+                _broker_miss_counts[symbol] = _broker_miss_counts.get(symbol, 0) + 1
+                miss_count = _broker_miss_counts[symbol]
+            if miss_count < 2:
+                logger.info(f"Position {symbol} missing from broker (miss {miss_count}/2) — will confirm next sync")
                 continue
 
             trade = risk.open_trades[symbol]
@@ -103,7 +108,8 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
 
             risk.close_trade(symbol, exit_price, now, exit_reason=broker_reason)
             logger.info(f"Position {symbol} confirmed gone from broker — {broker_reason} at ${exit_price:.2f} (entry ${trade.entry_price:.2f})")
-            _broker_miss_counts.pop(symbol, None)
+            with _broker_miss_lock:
+                _broker_miss_counts.pop(symbol, None)
 
             # BUG-022: Register cooldown when bracket stop fires at broker
             if broker_reason and "stop" in broker_reason.lower():
@@ -134,12 +140,13 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
                 except Exception as e:
                     logger.error(f"Failed to send close notification for {symbol}: {e}")
         else:
-            _broker_miss_counts.pop(symbol, None)
+            with _broker_miss_lock:
+                _broker_miss_counts.pop(symbol, None)
 
     # Re-adopt broker positions not in our tracking
     our_symbols = set(risk.open_trades.keys())
     for symbol in broker_positions:
-        if symbol not in our_symbols and symbol != "SPY":
+        if symbol not in our_symbols and symbol not in getattr(config, "BROKER_SYNC_EXCLUDE_SYMBOLS", {"SPY"}):
             bp = broker_positions[symbol]
             qty = int(float(bp.qty))
             avg_price = float(bp.avg_entry_price)

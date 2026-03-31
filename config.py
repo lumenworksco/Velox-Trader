@@ -307,7 +307,7 @@ KELLY_MIN_RISK = 0.003
 KELLY_MAX_RISK = 0.02
 
 # --- T7-004: Bayesian Kelly Sizing ---
-BAYESIAN_KELLY_ENABLED = False          # Enable regime-weighted Kelly fractions
+BAYESIAN_KELLY_ENABLED = True           # V11.4: Enable regime-weighted Kelly fractions
 
 # --- Daily P&L Controls ---
 PNL_GAIN_LOCK_PCT = 0.015
@@ -359,6 +359,9 @@ SHORT_HARD_STOP_PCT = 0.04         # Close short if goes against you > 4%
 MOMENTUM_TRAILING_STOP_PCT = 0.02  # Trailing stop for position monitor
 NO_SHORT_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA"}
 
+# V11.3: Symbols excluded from broker sync re-adoption (e.g., hedge positions)
+BROKER_SYNC_EXCLUDE_SYMBOLS = {"SPY"}
+
 # --- Dynamic Capital Allocation ---
 DYNAMIC_ALLOCATION = os.getenv("DYNAMIC_ALLOCATION", "true") == "true"
 ALLOCATION_LOOKBACK_DAYS = 20      # Rolling window for Sharpe-based allocation
@@ -404,8 +407,7 @@ CHASE_CONVERT_MARKET_AFTER = 120
 ADAPTIVE_TWAP_ENABLED = True
 
 # --- Exit Management ---
-ADVANCED_EXITS_ENABLED = False     # Superseded by ADAPTIVE_EXITS_ENABLED
-SCALED_TP_ENABLED = False          # Superseded by adaptive exits
+# V11.4: Removed ADVANCED_EXITS_ENABLED and SCALED_TP_ENABLED (superseded)
 ADAPTIVE_EXITS_ENABLED = True
 TRAILING_STOP_PCT = 0.015
 BREAKEVEN_STOP_ENABLED = True
@@ -434,7 +436,7 @@ RL_EXECUTION_ENABLED = False            # Enable deep RL execution agent
 EDGAR_MONITOR_ENABLED = False           # Enable real-time 8-K filing monitor
 
 # --- T7-005: Black-Litterman Portfolio Optimization ---
-BLACK_LITTERMAN_ENABLED = False         # Enable BL portfolio-level optimization
+BLACK_LITTERMAN_ENABLED = True          # V11.4: Enable BL portfolio-level optimization
 
 # --- Scan Configuration ---
 SCAN_INTERVAL_SEC = 120

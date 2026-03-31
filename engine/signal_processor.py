@@ -88,13 +88,55 @@ _ml_inference_engine = None
 _ml_inference_attempted = False
 
 
+_ml_model_file_mtime = 0.0  # V11.4: Track model file modification time for hot-swap
+
+
+def reload_ml_model():
+    """V11.4: Force reload the ML model (e.g., after retraining).
+
+    Thread-safe — acquires state lock before swapping.
+    """
+    global _ml_inference_engine, _ml_model_file_mtime
+    with _state.lock:
+        _state.ml_model = None
+        _state.ml_model_load_attempted = False
+        _ml_inference_engine = None
+        _ml_model_file_mtime = 0.0
+    logger.info("V11.4: ML model reload triggered")
+    return _get_ml_model()
+
+
+def check_ml_model_freshness():
+    """V11.4: Check if a newer model file exists and hot-swap if so.
+
+    Called periodically (e.g., every 5 minutes) from the main loop.
+    Zero-downtime: loads new model, then swaps reference under lock.
+    """
+    global _ml_model_file_mtime
+    try:
+        import glob as _glob
+        import os
+        model_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+        pkl_files = sorted(_glob.glob(os.path.join(model_dir, "model_*.pkl")))
+        if not pkl_files:
+            return
+        latest = pkl_files[-1]
+        mtime = os.path.getmtime(latest)
+        if mtime > _ml_model_file_mtime and _ml_model_file_mtime > 0:
+            logger.info("V11.4: New ML model detected: %s (mtime %.0f > %.0f)", latest, mtime, _ml_model_file_mtime)
+            reload_ml_model()
+        _ml_model_file_mtime = mtime
+    except Exception as e:
+        logger.debug("V11.4: Model freshness check failed: %s", e)
+
+
 def _get_ml_model():
     """Lazy-load the most recent trained ML model (singleton, fail-open).
 
     V11.3 T9: Tries BatchInferenceEngine first (joblib models), then falls
     back to the legacy ModelTrainer.load_model path.
     """
-    global _ml_inference_engine, _ml_inference_attempted
+    global _ml_inference_engine, _ml_inference_attempted, _ml_model_file_mtime
 
     if _state.ml_model_load_attempted:
         return _state.ml_model
@@ -120,6 +162,8 @@ def _get_ml_model():
                 model_path = pkl_files[-1]
 
             if model_path:
+                # V11.4: Track model file mtime for hot-swap detection
+                _ml_model_file_mtime = os.path.getmtime(model_path)
                 try:
                     from ml.inference import BatchInferenceEngine
                     _ml_inference_engine = BatchInferenceEngine(model_path=model_path)
@@ -407,11 +451,16 @@ def _is_asset_blocked(symbol: str) -> bool:
             else:
                 del _asset_status_blocklist[symbol]
 
-    # T1-002: If asset status data is stale (> 10 min since last successful refresh),
-    # block unknown symbols as a fail-safe
+    # T1-002 + V11.4: If asset status data is stale (> 10 min since last successful refresh),
+    # only block symbols that were previously seen as halted — don't block unknown symbols
+    # because that would prevent ALL trading when the asset status API is temporarily down.
     if _last_successful_asset_refresh > 0 and (current_ts - _last_successful_asset_refresh) > _ASSET_STALE_THRESHOLD_SEC:
-        logger.warning(f"T1-002: asset status data stale (>{_ASSET_STALE_THRESHOLD_SEC}s), blocking {symbol}")
-        return True
+        with _state.lock:
+            if symbol in _asset_status_blocklist:
+                logger.warning(f"T1-002: asset status stale, blocking previously-halted {symbol}")
+                return True
+        # V11.4: Don't block unknown symbols — fail-open for API outages
+        logger.debug(f"V11.4: asset status stale but {symbol} not in blocklist, allowing")
 
     # On-demand check for symbols not in blocklist
     # Only do on-demand checks if we've had at least one successful refresh

@@ -227,18 +227,21 @@ class TestCheckExits:
     def test_check_exits_full_reversion(
         self, mock_zscore, mock_bars, strategy
     ):
-        """V11.3 T11: Partial exit when z-score reverts near zero (was full)."""
+        """V11.4: z=0.1 (slightly above mean for long) only moves stop, no exit.
+        Full reversion exit triggers at z in [-0.2, 0] for longs."""
         strategy.ou_params = {
             "AAPL": {'kappa': 0.15, 'mu': 100.0, 'sigma': 1.5, 'half_life': 0.5}
         }
 
         bars = _make_intraday_bars(5, base_price=100.0)
         mock_bars.return_value = bars
-        mock_zscore.return_value = 0.1  # Near zero -> V11.3: partial (was full)
+        # V11.4: Use z=-0.1 (negative side of mean for long) to trigger partial exit
+        mock_zscore.return_value = -0.1
 
         trade = SimpleNamespace(
             strategy="STAT_MR", side="buy",
             entry_time=datetime(2026, 3, 13, 10, 0, tzinfo=ET),
+            stop_loss=99.0, entry_price=100.0,
         )
 
         now = datetime(2026, 3, 13, 10, 30, tzinfo=ET)
@@ -246,7 +249,7 @@ class TestCheckExits:
 
         assert len(exits) == 1
         assert exits[0]["symbol"] == "AAPL"
-        assert exits[0]["action"] == "partial"  # V11.3 T11: changed from "full" to "partial"
+        assert exits[0]["action"] == "partial"
         assert "reverted" in exits[0]["reason"].lower() or "MR" in exits[0]["reason"]
 
     @patch("strategies.stat_mean_reversion.get_intraday_bars")

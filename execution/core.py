@@ -629,13 +629,12 @@ def submit_bracket_order(signal: Signal, qty: int, order_manager=None) -> str | 
                 )
                 return None
 
-            # Widen TP/SL by predicted slippage to account for execution cost
+            # V11.4: Only widen the stop-loss (protective side) by predicted slippage.
+            # Widening TP is counterproductive — it makes profits harder to capture.
             if slippage_dollars > 0.01:
                 if signal.side == "buy":
-                    signal.take_profit = round(signal.take_profit + slippage_dollars, 2)
                     signal.stop_loss = round(signal.stop_loss - slippage_dollars, 2)
                 else:
-                    signal.take_profit = round(signal.take_profit - slippage_dollars, 2)
                     signal.stop_loss = round(signal.stop_loss + slippage_dollars, 2)
 
             logger.debug(

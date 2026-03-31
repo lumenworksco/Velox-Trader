@@ -98,6 +98,8 @@ class SlippageModel:
         self._max_errors = 1000
         self._trained = False
         self._lock = threading.Lock()
+        # V11.4: Load persisted weights on startup
+        self.load_weights()
 
     def predict_slippage(self, features: SlippageFeatures) -> SlippagePrediction:
         """Predict expected slippage for an order.
@@ -290,6 +292,11 @@ class SlippageModel:
             f"SlippageModel retrained (#{self._retrain_count}) "
             f"on {len(self._fill_history)} fills"
         )
+        # V11.4: Persist weights after retrain
+        try:
+            self.save_weights()
+        except Exception as e:
+            logger.warning("V11.4: Failed to save slippage weights: %s", e)
 
     def record_prediction_error(self, predicted_bps: float, actual_bps: float) -> None:
         """Record a prediction error for model monitoring.
@@ -430,6 +437,58 @@ class SlippageModel:
 
             avg_loss = total_loss / len(fills) if fills else 0
             logger.debug(f"SlippageModel SGD epoch loss: {avg_loss:.4f}")
+
+    def save_weights(self, path: str = None) -> None:
+        """V11.4: Persist learned weights to disk so they survive restarts."""
+        import json
+        import os
+        if path is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "slippage_weights.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with self._lock:
+            data = {
+                "intercept": self._weights.intercept,
+                "w_spread": self._weights.w_spread,
+                "w_volatility": self._weights.w_volatility,
+                "w_size": self._weights.w_size,
+                "w_vix": self._weights.w_vix,
+                "w_opening": self._weights.w_opening,
+                "w_closing": self._weights.w_closing,
+                "w_market_order": self._weights.w_market_order,
+                "retrain_count": self._retrain_count,
+                "trained": self._trained,
+            }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info("V11.4: Slippage weights saved to %s", path)
+
+    def load_weights(self, path: str = None) -> bool:
+        """V11.4: Load persisted weights from disk."""
+        import json
+        import os
+        if path is None:
+            path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "slippage_weights.json")
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            with self._lock:
+                self._weights.intercept = data.get("intercept", self._weights.intercept)
+                self._weights.w_spread = data.get("w_spread", self._weights.w_spread)
+                self._weights.w_volatility = data.get("w_volatility", self._weights.w_volatility)
+                self._weights.w_size = data.get("w_size", self._weights.w_size)
+                self._weights.w_vix = data.get("w_vix", self._weights.w_vix)
+                self._weights.w_opening = data.get("w_opening", self._weights.w_opening)
+                self._weights.w_closing = data.get("w_closing", self._weights.w_closing)
+                self._weights.w_market_order = data.get("w_market_order", self._weights.w_market_order)
+                self._retrain_count = data.get("retrain_count", 0)
+                self._trained = data.get("trained", False)
+            logger.info("V11.4: Slippage weights loaded from %s (retrain_count=%d)", path, self._retrain_count)
+            return True
+        except Exception as e:
+            logger.warning("V11.4: Failed to load slippage weights: %s", e)
+            return False
 
     @property
     def stats(self) -> dict:

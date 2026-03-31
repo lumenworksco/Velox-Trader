@@ -1,30 +1,26 @@
-"""Velox V11 — Institutional-Grade Quantitative Trading System.
+"""Velox V11.3 — Institutional-Grade Quantitative Trading System.
 
-Eight-strategy portfolio with HMM regime detection, ML-enhanced alpha,
-hierarchical risk parity allocation, cross-asset signals, signal ranking,
-intraday seasonality, factor risk model, volatility-targeted sizing,
-Kelly criterion, daily P&L locks, intraday risk controls, beta neutralization,
-smart order routing, optimal execution (Almgren-Chriss), overnight holds,
-parameter optimization, BOCPD regime detection, VPIN microstructure,
-event-driven backtesting, compliance audit trail, and operational hardening.
+Six-strategy portfolio with HMM regime detection, ML-enhanced alpha,
+volatility-targeted sizing, Kelly criterion, conviction-scored signal pipeline,
+intraday risk controls, daily P&L locks, ATR-based trailing stops, data quality
+gating, pre-trade slippage prediction, and operational hardening.
 
-Strategies: StatMR (40%), VWAP (20%), KalmanPairs (20%), PEAD (10%),
-            ORB (5%), MicroMom (5%), SectorMomentum, CrossSectionalMomentum.
+Strategies: StatMR (35%), VWAP (20%), KalmanPairs (20%), ORB (10%),
+            MicroMom (10%), PEAD (5%).
 
-V11 Upgrade: 115+ enhancements across 18 phases including:
-- 26 critical bug fixes (race conditions, timezone, division-by-zero)
-- Event-driven architecture with async I/O
-- ML pipeline (200+ features, LightGBM/XGBoost ensemble, meta-labeling)
-- López de Prado framework (fractional diff, information bars, entropy)
-- Market microstructure (VPIN, order flow, trade classification)
-- Factor risk model, HRP allocation, stress testing
-- Smart order routing, Almgren-Chriss execution
-- Compliance audit trail, self-surveillance, PDT enforcement
-- Monitoring: tiered alerting, latency tracking, position reconciliation
+V11.3 Upgrades:
+- Conviction scoring replaces multiplicative multiplier stack (T1)
+- Intraday risk controls with rolling P&L limits (T2)
+- ATR-based trailing stops for MicroMomentum and ORB (T3/T12)
+- Pre-trade slippage model integration (T4)
+- VIX rate-of-change scaling (T6)
+- ML inference via BatchInferenceEngine (T9)
+- Capital reallocation from dead strategies (T10)
+- Scaled StatMR exits with overshoot capture (T11)
+- Production hardening: thread safety, dead code removal
 """
 
 import argparse
-import asyncio
 import logging
 import signal
 import sys
@@ -172,25 +168,8 @@ except ImportError:
     FillMonitor = None
 
 # --- V11 module imports (all fail-open for graceful degradation) ---
-try:
-    from strategies.sector_momentum import SectorMomentumStrategy
-except ImportError:
-    SectorMomentumStrategy = None
-
-try:
-    from strategies.cross_sectional_momentum import CrossSectionalMomentum
-except ImportError:
-    CrossSectionalMomentum = None
-
-try:
-    from strategies.multi_timeframe import MultiTimeframeFilter
-except ImportError:
-    MultiTimeframeFilter = None
-
-try:
-    from strategies.copula_pairs import CopulaPairsStrategy
-except ImportError:
-    CopulaPairsStrategy = None
+# V11.3: Removed unused strategy imports (SectorMomentum, CrossSectionalMomentum,
+# MultiTimeframe, CopulaPairs) — these strategies are no longer in STRATEGY_ALLOCATIONS.
 
 try:
     from risk.factor_model import FactorRiskModel
@@ -316,6 +295,12 @@ try:
     from ops.drawdown_risk import DrawdownRiskManager
 except ImportError:
     DrawdownRiskManager = None
+
+# V11.4: Black-Litterman portfolio optimization
+try:
+    from risk.black_litterman import BlackLittermanOptimizer
+except ImportError:
+    BlackLittermanOptimizer = None
 
 try:
     from ops.disaster_recovery import DisasterRecovery
@@ -768,6 +753,15 @@ def main():
             logger.info("V11.3: Intraday risk controls initialized (5m/30m/1h windows + velocity)")
         except Exception as e:
             logger.warning(f"V11.3: Intraday risk controls init failed (non-fatal): {e}")
+
+    # V11.4: Black-Litterman portfolio optimization
+    bl_optimizer = None
+    if BlackLittermanOptimizer and getattr(config, "BLACK_LITTERMAN_ENABLED", False):
+        try:
+            bl_optimizer = BlackLittermanOptimizer()
+            logger.info("V11.4: Black-Litterman optimizer initialized")
+        except Exception as e:
+            logger.warning(f"V11.4: Black-Litterman init failed (non-fatal): {e}")
 
     # Load filters
     try:
@@ -1279,6 +1273,24 @@ def main():
                         except Exception as e:
                             logger.error(f"Adaptive allocation failed: {e}")
 
+                    # V11.4: Black-Litterman portfolio optimization at EOD
+                    if bl_optimizer:
+                        try:
+                            active_syms = list(risk.open_trades.keys())
+                            if len(active_syms) >= 2:
+                                bl_optimizer.set_universe(active_syms)
+                                # Use correlation limiter's matrix if available
+                                if corr_limiter and hasattr(corr_limiter, '_last_good_matrix'):
+                                    cov = getattr(corr_limiter, '_last_good_matrix', None)
+                                    if cov is not None and cov.shape[0] == len(active_syms):
+                                        bl_optimizer.set_market_data(covariance=cov)
+                                        result = bl_optimizer.optimize()
+                                        if result and result.weights is not None:
+                                            bl_weights = {s: float(w) for s, w in zip(result.symbols, result.weights)}
+                                            logger.info(f"V11.4: BL weights: {bl_weights}")
+                        except Exception as e:
+                            logger.debug(f"V11.4: Black-Litterman EOD optimization skipped: {e}")
+
                     eod_summary_printed = True
 
                 # -------------------------------------------------------
@@ -1321,6 +1333,13 @@ def main():
                                     )
                         except Exception as e:
                             logger.debug(f"VaR update failed: {e}")
+
+                    # V11.4: Check for new ML model (hot-swap)
+                    try:
+                        from engine.signal_processor import check_ml_model_freshness
+                        check_ml_model_freshness()
+                    except Exception as e:
+                        logger.debug(f"V11.4: ML model freshness check failed: {e}")
 
                     last_analytics_update = current
 

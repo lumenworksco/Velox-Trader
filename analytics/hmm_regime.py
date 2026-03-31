@@ -41,48 +41,56 @@ class MarketRegimeState(Enum):
     MEAN_REVERTING = "mean_reverting"    # Range-bound, choppy — best for StatMR/VWAP/Pairs
 
 
-# Strategy-regime affinity multipliers: how well each strategy performs in each regime
+# V11.4: Strategy-regime affinity multipliers — more aggressive gating.
+# Strategies are now effectively disabled (0.0) in their worst regimes,
+# and boosted (up to 1.5) in their best regimes.
 STRATEGY_REGIME_AFFINITY = {
     "STAT_MR": {
-        MarketRegimeState.LOW_VOL_BULL: 0.7,
-        MarketRegimeState.HIGH_VOL_BULL: 0.5,
-        MarketRegimeState.LOW_VOL_BEAR: 1.0,
-        MarketRegimeState.HIGH_VOL_BEAR: 0.2,
-        MarketRegimeState.MEAN_REVERTING: 1.3,
+        # Mean-reversion thrives in range-bound, low-vol markets
+        MarketRegimeState.LOW_VOL_BULL: 0.8,
+        MarketRegimeState.HIGH_VOL_BULL: 0.4,
+        MarketRegimeState.LOW_VOL_BEAR: 1.2,
+        MarketRegimeState.HIGH_VOL_BEAR: 0.0,     # Don't mean-revert in crashes
+        MarketRegimeState.MEAN_REVERTING: 1.5,
     },
     "VWAP": {
-        MarketRegimeState.LOW_VOL_BULL: 0.6,
-        MarketRegimeState.HIGH_VOL_BULL: 0.4,
-        MarketRegimeState.LOW_VOL_BEAR: 1.0,
-        MarketRegimeState.HIGH_VOL_BEAR: 0.2,
-        MarketRegimeState.MEAN_REVERTING: 1.2,
+        # VWAP bands work best in mean-reverting regimes
+        MarketRegimeState.LOW_VOL_BULL: 0.7,
+        MarketRegimeState.HIGH_VOL_BULL: 0.3,
+        MarketRegimeState.LOW_VOL_BEAR: 1.1,
+        MarketRegimeState.HIGH_VOL_BEAR: 0.0,     # Bands break in crashes
+        MarketRegimeState.MEAN_REVERTING: 1.4,
     },
     "KALMAN_PAIRS": {
-        MarketRegimeState.LOW_VOL_BULL: 0.8,
-        MarketRegimeState.HIGH_VOL_BULL: 0.6,
-        MarketRegimeState.LOW_VOL_BEAR: 0.9,
-        MarketRegimeState.HIGH_VOL_BEAR: 0.3,
-        MarketRegimeState.MEAN_REVERTING: 1.1,
+        # Pairs are market-neutral, work in most regimes except extreme vol
+        MarketRegimeState.LOW_VOL_BULL: 1.0,
+        MarketRegimeState.HIGH_VOL_BULL: 0.7,
+        MarketRegimeState.LOW_VOL_BEAR: 1.0,
+        MarketRegimeState.HIGH_VOL_BEAR: 0.2,     # Correlations break down
+        MarketRegimeState.MEAN_REVERTING: 1.2,
     },
     "ORB": {
-        MarketRegimeState.LOW_VOL_BULL: 1.3,
-        MarketRegimeState.HIGH_VOL_BULL: 0.8,
-        MarketRegimeState.LOW_VOL_BEAR: 0.4,
-        MarketRegimeState.HIGH_VOL_BEAR: 0.3,
-        MarketRegimeState.MEAN_REVERTING: 0.5,
+        # Breakouts need directional momentum — bullish bias
+        MarketRegimeState.LOW_VOL_BULL: 1.4,
+        MarketRegimeState.HIGH_VOL_BULL: 1.0,
+        MarketRegimeState.LOW_VOL_BEAR: 0.3,
+        MarketRegimeState.HIGH_VOL_BEAR: 0.5,     # Can short breakdowns
+        MarketRegimeState.MEAN_REVERTING: 0.2,     # Breakouts fail in ranges
     },
     "MICRO_MOM": {
-        MarketRegimeState.LOW_VOL_BULL: 1.0,
-        MarketRegimeState.HIGH_VOL_BULL: 1.3,
-        MarketRegimeState.LOW_VOL_BEAR: 0.6,
-        MarketRegimeState.HIGH_VOL_BEAR: 0.8,
-        MarketRegimeState.MEAN_REVERTING: 0.7,
+        # Micro-momentum needs volatility for opportunities
+        MarketRegimeState.LOW_VOL_BULL: 0.8,
+        MarketRegimeState.HIGH_VOL_BULL: 1.5,
+        MarketRegimeState.LOW_VOL_BEAR: 0.5,
+        MarketRegimeState.HIGH_VOL_BEAR: 1.0,     # Vol creates micro-events
+        MarketRegimeState.MEAN_REVERTING: 0.6,
     },
     "PEAD": {
-        MarketRegimeState.LOW_VOL_BULL: 1.2,
-        MarketRegimeState.HIGH_VOL_BULL: 0.8,
-        MarketRegimeState.LOW_VOL_BEAR: 0.7,
-        MarketRegimeState.HIGH_VOL_BEAR: 0.4,
+        # Earnings drift is regime-independent but better in calm markets
+        MarketRegimeState.LOW_VOL_BULL: 1.3,
+        MarketRegimeState.HIGH_VOL_BULL: 0.9,
+        MarketRegimeState.LOW_VOL_BEAR: 0.8,
+        MarketRegimeState.HIGH_VOL_BEAR: 0.3,     # Everything moves together
         MarketRegimeState.MEAN_REVERTING: 1.0,
     },
 }

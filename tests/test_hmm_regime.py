@@ -201,7 +201,7 @@ class TestHMMRegimeDetector:
 class TestRegimeSizeMultiplier:
     def test_known_strategy_known_regime(self):
         mult = get_regime_size_multiplier("STAT_MR", MarketRegimeState.MEAN_REVERTING)
-        assert mult == 1.3  # From STRATEGY_REGIME_AFFINITY
+        assert mult == 1.5  # V11.4: Updated from 1.3 to 1.5
 
     def test_unknown_strategy_returns_one(self):
         mult = get_regime_size_multiplier("UNKNOWN_STRAT", MarketRegimeState.LOW_VOL_BULL)
@@ -213,14 +213,14 @@ class TestRegimeSizeMultiplier:
             MarketRegimeState.MEAN_REVERTING: 0.5,
         }
         mult = get_regime_size_multiplier("STAT_MR", MarketRegimeState.LOW_VOL_BULL, probs)
-        # 0.5 * 0.7 + 0.5 * 1.3 = 1.0
-        assert abs(mult - 1.0) < 0.01
+        # V11.4: 0.5 * 0.8 + 0.5 * 1.5 = 1.15
+        assert abs(mult - 1.15) < 0.01
 
     def test_clamped_to_range(self):
         # Even with extreme probabilities, output is clamped
         probs = {MarketRegimeState.HIGH_VOL_BEAR: 1.0}
         mult = get_regime_size_multiplier("STAT_MR", MarketRegimeState.HIGH_VOL_BEAR, probs)
-        assert 0.2 <= mult <= 1.5
+        assert 0.0 <= mult <= 1.5
 
 
 # ===================================================================
@@ -325,7 +325,7 @@ class TestMarketRegimeWrapper:
         regime.hmm_probabilities = {MarketRegimeState.MEAN_REVERTING: 1.0}
 
         affinity = regime.get_regime_affinity("STAT_MR")
-        assert affinity == 1.3  # STAT_MR in MEAN_REVERTING = 1.3
+        assert affinity == 1.5  # V11.4: STAT_MR in MEAN_REVERTING = 1.5
 
 
 # ===================================================================

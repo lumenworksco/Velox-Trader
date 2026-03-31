@@ -85,29 +85,38 @@ def get_vix_risk_scalar() -> float:
     vix = get_vix_level()
 
     # Track VIX history for rate-of-change (keep last 10 readings ≈ 20 min at 120s scan)
-    _vix_history.append(vix)
-    if len(_vix_history) > 10:
-        _vix_history.pop(0)
+    # V11.3 P1: Protected by _vix_cache_lock for thread safety
+    with _vix_cache_lock:
+        _vix_history.append(vix)
+        if len(_vix_history) > 10:
+            _vix_history.pop(0)
 
     # Level-based floor (safety net)
     if vix >= config.VIX_HALT_THRESHOLD:
         return 0.0  # Halt all new positions
 
-    # Base scalar from level (less aggressive than before)
-    if vix < 15:
-        level_scalar = 1.0
-    elif vix < 20:
-        level_scalar = 0.90
-    elif vix < 25:
-        level_scalar = 0.80
-    elif vix < 30:
-        level_scalar = 0.65
+    # V11.4: Smooth linear interpolation instead of step discontinuities.
+    # Breakpoints: VIX 12→1.0, 15→0.95, 20→0.85, 25→0.70, 30→0.50, 35→0.35
+    _vix_breakpoints = [(12, 1.0), (15, 0.95), (20, 0.85), (25, 0.70), (30, 0.50), (35, 0.35)]
+    if vix <= _vix_breakpoints[0][0]:
+        level_scalar = _vix_breakpoints[0][1]
+    elif vix >= _vix_breakpoints[-1][0]:
+        level_scalar = _vix_breakpoints[-1][1]
     else:
-        level_scalar = 0.40
+        for i in range(len(_vix_breakpoints) - 1):
+            v0, s0 = _vix_breakpoints[i]
+            v1, s1 = _vix_breakpoints[i + 1]
+            if v0 <= vix < v1:
+                t = (vix - v0) / (v1 - v0)
+                level_scalar = s0 + t * (s1 - s0)
+                break
 
     # Rate-of-change adjustment: compare current VIX to average of last readings
-    if len(_vix_history) >= 3:
-        vix_avg = sum(_vix_history[:-1]) / len(_vix_history[:-1])
+    # V11.3 P1: Snapshot history under lock for thread safety
+    with _vix_cache_lock:
+        _history_snapshot = list(_vix_history)
+    if len(_history_snapshot) >= 3:
+        vix_avg = sum(_history_snapshot[:-1]) / len(_history_snapshot[:-1])
         vix_change_pct = (vix - vix_avg) / max(vix_avg, 1.0)
 
         if vix_change_pct > 0.10:

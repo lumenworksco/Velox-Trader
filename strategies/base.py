@@ -52,6 +52,14 @@ class Signal:
     timestamp: Optional[datetime] = None
     pair_symbol: Optional[str] = None
 
+    def __post_init__(self):
+        """V11.3: Validate signal fields to catch misconfigured strategies early."""
+        self.confidence = max(0.0, min(1.0, self.confidence))
+        if self.entry_price <= 0:
+            raise ValueError(f"Signal {self.symbol}: entry_price must be > 0, got {self.entry_price}")
+        if self.stop_loss <= 0 or self.take_profit <= 0:
+            raise ValueError(f"Signal {self.symbol}: stop_loss and take_profit must be > 0")
+
 
 # ============================================================
 # ExitParams — returned by strategy exit checks
