@@ -28,8 +28,19 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# Set TESTING to avoid config requiring API keys during import
-os.environ.setdefault("TESTING", "1")
+# Load .env file if it exists (for API keys)
+_env_file = PROJECT_ROOT / ".env"
+if _env_file.exists():
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _, _val = _line.partition("=")
+                os.environ.setdefault(_key.strip(), _val.strip())
+
+# Only set TESTING if no real API keys are present
+if not os.environ.get("ALPACA_API_KEY"):
+    os.environ.setdefault("TESTING", "1")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,6 +69,77 @@ TRAINING_UNIVERSE = [
     # ETFs for cross-asset context
     "SPY", "QQQ", "IWM", "XLF", "XLK", "XLE", "XLV",
 ]
+
+
+def fetch_alpaca_training_data(
+    symbols: list[str],
+    days: int = 252,
+) -> pd.DataFrame | None:
+    """Fetch real historical daily bars from Alpaca API.
+
+    Returns None if API is unavailable (falls back to synthetic).
+    """
+    try:
+        from data.fetcher import get_data_client
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.enums import DataFeed
+
+        client = get_data_client()
+        end = datetime.now()
+        start = end - timedelta(days=int(days * 1.5))  # Buffer for weekends/holidays
+
+        logger.info("Fetching %d days of daily bars for %d symbols from Alpaca...", days, len(symbols))
+
+        all_bars = []
+        batch_size = 20  # Alpaca supports multi-symbol requests
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            try:
+                request = StockBarsRequest(
+                    symbol_or_symbols=batch,
+                    timeframe=TimeFrame.Day,
+                    start=start,
+                    end=end,
+                    feed=DataFeed.IEX,
+                )
+                barset = client.get_stock_bars(request)
+
+                data = barset.data if hasattr(barset, "data") else barset
+                for symbol, bars in data.items():
+                    for bar in bars:
+                        all_bars.append({
+                            "symbol": str(symbol),
+                            "timestamp": bar.timestamp,
+                            "open": float(bar.open),
+                            "high": float(bar.high),
+                            "low": float(bar.low),
+                            "close": float(bar.close),
+                            "volume": float(bar.volume),
+                        })
+
+                logger.info("  Fetched batch %d/%d (%d symbols)",
+                           i // batch_size + 1,
+                           (len(symbols) + batch_size - 1) // batch_size,
+                           len(batch))
+                import time as _t
+                _t.sleep(0.3)  # Rate limit courtesy
+            except Exception as e:
+                logger.warning("  Batch fetch failed for %s: %s", batch[:3], e)
+                continue
+
+        if not all_bars:
+            logger.warning("No bars fetched from Alpaca — falling back to synthetic data")
+            return None
+
+        df = pd.DataFrame(all_bars)
+        n_symbols = df["symbol"].nunique()
+        logger.info("Fetched %d bars for %d symbols from Alpaca", len(df), n_symbols)
+        return df
+
+    except Exception as e:
+        logger.warning("Alpaca data fetch failed: %s — falling back to synthetic data", e)
+        return None
 
 
 def generate_synthetic_training_data(
@@ -249,7 +331,10 @@ def train_and_save(
     if model_dir is None:
         model_dir = str(PROJECT_ROOT / "models")
 
-    trainer = ModelTrainer(model_type="classification", use_stacking=True)
+    # V11.4: Use averaging instead of stacking — more robust when base models
+    # are correlated (all gradient boosters on same features). Stacking tends
+    # to overfit the meta-learner, hurting OOS performance.
+    trainer = ModelTrainer(model_type="classification", use_stacking=False)
 
     # Optional: Bayesian hyperparameter optimization
     if optimize:
@@ -332,12 +417,20 @@ def main():
     if args.optimize:
         logger.info("  Trials: %d", args.trials)
 
-    # Step 1: Generate training data
-    logger.info("\n--- Step 1: Generating Training Data ---")
-    bars_df = generate_synthetic_training_data(
-        n_symbols=args.symbols,
-        n_bars_per_symbol=args.days,
-    )
+    # Step 1: Fetch training data (real Alpaca data, fallback to synthetic)
+    logger.info("\n--- Step 1: Fetching Training Data ---")
+    bars_df = None
+    if os.environ.get("ALPACA_API_KEY"):
+        bars_df = fetch_alpaca_training_data(
+            symbols=TRAINING_UNIVERSE[:args.symbols],
+            days=args.days,
+        )
+    if bars_df is None:
+        logger.info("Using synthetic training data")
+        bars_df = generate_synthetic_training_data(
+            n_symbols=args.symbols,
+            n_bars_per_symbol=args.days,
+        )
 
     # Step 2: Compute features and labels
     logger.info("\n--- Step 2: Computing Features & Labels ---")

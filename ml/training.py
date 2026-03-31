@@ -560,6 +560,11 @@ class ModelTrainer:
                 else:
                     meta_X = oof_preds[oof_mask][:, usable_cols]
                     meta_y = y[oof_mask]
+                    # V11.4: Clip and scale OOF predictions to prevent overflow
+                    meta_X = np.clip(meta_X, -1e6, 1e6)
+                    meta_X = np.nan_to_num(meta_X, nan=0.5, posinf=1.0, neginf=0.0)
+                    _meta_scaler = StandardScaler()
+                    meta_X = _meta_scaler.fit_transform(meta_X)
                     if self.model_type == "classification":
                         meta_model = LogisticRegression(
                             C=1.0, max_iter=1000, solver="lbfgs"
@@ -793,11 +798,8 @@ class ModelTrainer:
             logger.warning("T5-003: sklearn required for optimization")
             return {}
 
-        import config as _cfg
-        if not getattr(_cfg, "ML_ENSEMBLE_ENABLED", False):
-            logger.info("T5-003: ML_ENSEMBLE_ENABLED=False — skipping optimization")
-            return {}
-
+        # V11.4: Removed ML_ENSEMBLE_ENABLED gate — optimization should always
+        # run when explicitly called (the gate was for the live signal path, not training)
         logger.info("T5-003: Starting Bayesian hyperparameter optimization (%d trials)", n_trials)
 
         X = features_df.values.astype(np.float64)
