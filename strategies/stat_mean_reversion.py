@@ -199,10 +199,15 @@ class StatMeanReversion:
                     continue
 
                 # === LONG entry: price below mean ===
-                # In BEARISH regime, require deeper z-score (stronger mean reversion signal)
-                mr_entry_z = config.MR_ZSCORE_ENTRY if regime != "BEARISH" else config.MR_ZSCORE_ENTRY * 1.2
+                # MR works better in downtrends — use LOWER threshold in BEARISH (more entries)
+                # In BULLISH, use slightly higher bar (1.1x)
+                if regime == "BEARISH":
+                    mr_entry_z = config.MR_ZSCORE_ENTRY * 0.85
+                elif regime == "BULLISH":
+                    mr_entry_z = config.MR_ZSCORE_ENTRY * 1.1
+                else:
+                    mr_entry_z = config.MR_ZSCORE_ENTRY
                 if (zscore < -mr_entry_z
-                        and rsi < config.MR_RSI_OVERSOLD
                         and price < vwap):
 
                     # Target: revert to z=MR_ZSCORE_EXIT_FULL (near mean)
@@ -238,8 +243,7 @@ class StatMeanReversion:
                     ))
 
                 # === SHORT entry: price above mean ===
-                elif (zscore > config.MR_ZSCORE_ENTRY
-                      and rsi > config.MR_RSI_OVERBOUGHT
+                elif (zscore > mr_entry_z
                       and price > vwap
                       and regime != "BULLISH"
                       and config.ALLOW_SHORT

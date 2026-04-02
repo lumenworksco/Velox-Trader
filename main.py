@@ -45,6 +45,11 @@ from engine.signal_processor import process_signals
 from engine.exit_processor import (
     handle_strategy_exits, handle_ws_close, get_current_prices,
 )
+# V12: Import advanced exit checks (profit tiers, dead signal, scale-out)
+try:
+    from engine.exit_processor import check_advanced_exits as _check_advanced_exits
+except ImportError:
+    _check_advanced_exits = None
 from engine.scanner import scan_all_strategies, check_all_exits, run_beta_neutralization
 from engine.daily_tasks import daily_reset, weekly_tasks, eod_close
 from strategies.base import Signal
@@ -520,6 +525,53 @@ def main():
     if args.live:
         import os
         os.environ["ALPACA_LIVE"] = "true"
+
+    # V12: Pre-flight check — verify critical systems before trading
+    def _preflight_check():
+        """Verify critical subsystems are functional before entering main loop."""
+        issues = []
+
+        # 1. Database writable
+        try:
+            database.init_db()
+        except Exception as e:
+            issues.append(f"Database init failed: {e}")
+
+        # 2. ML model loaded
+        try:
+            import glob as _g
+            import os as _os
+            model_dir = _os.path.join(_os.path.dirname(__file__), "models")
+            ml_models = _g.glob(_os.path.join(model_dir, "model_*.pkl"))
+            if not ml_models:
+                issues.append("No trained ML model found in models/ — ML will return neutral (0.5)")
+            else:
+                logger.info(f"V12 preflight: ML model found: {ml_models[-1]}")
+        except Exception:
+            pass
+
+        # 3. Strategy allocations sum to 1.0
+        alloc_sum = sum(config.STRATEGY_ALLOCATIONS.values())
+        if abs(alloc_sum - 1.0) > 0.01:
+            issues.append(f"Strategy allocations sum to {alloc_sum:.3f}, not 1.0")
+
+        # 4. Config sanity
+        if config.RISK_PER_TRADE_PCT > 0.05:
+            issues.append(f"RISK_PER_TRADE_PCT={config.RISK_PER_TRADE_PCT} is dangerously high (>5%)")
+        if config.MAX_POSITIONS < 1:
+            issues.append(f"MAX_POSITIONS={config.MAX_POSITIONS} — no trades possible")
+
+        if issues:
+            for issue in issues:
+                logger.warning(f"V12 PREFLIGHT WARNING: {issue}")
+                console.print(f"[yellow]PREFLIGHT: {issue}[/yellow]")
+        else:
+            logger.info("V12 preflight: All checks passed")
+            console.print("[green]V12 preflight: All systems go[/green]")
+
+        return len(issues) == 0
+
+    _preflight_check()
 
     # Backtest mode
     if args.backtest:
@@ -1139,6 +1191,15 @@ def main():
                             current, risk, stat_mr, kalman_pairs, micro_mom,
                             orb_strategy, pead_strategy, ws_monitor,
                         )
+
+                        # 5b. V12: Advanced exits (profit tiers, dead signal, scale-out)
+                        if _check_advanced_exits is not None:
+                            try:
+                                adv_exits = _check_advanced_exits(risk, current)
+                                if adv_exits:
+                                    handle_strategy_exits(adv_exits, risk, current, ws_monitor)
+                            except Exception as e:
+                                logger.debug(f"V12: Advanced exits check failed (non-fatal): {e}")
 
                         # 6. Beta neutralization
                         run_beta_neutralization(

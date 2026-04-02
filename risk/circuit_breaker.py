@@ -138,7 +138,7 @@ class TieredCircuitBreaker:
             old_cfg = self.tiers[old_tier]
             # P&L must be above (old threshold + hysteresis) to de-escalate.
             # E.g. RED threshold is -3%; must recover above -2.8% to leave RED.
-            if day_pnl_pct <= old_cfg.threshold_pct + self.HYSTERESIS_PCT:
+            if day_pnl_pct < old_cfg.threshold_pct + self.HYSTERESIS_PCT:
                 new_tier = old_tier  # stay at current tier
 
         if new_tier != old_tier:

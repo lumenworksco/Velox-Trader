@@ -131,7 +131,7 @@ class SlippageModel:
 
         # Normalize features
         vol_normalized = features.volatility / 0.20  # Normalize to ~20% annual vol
-        size_log = math.log1p(features.size_adv_ratio * 1000)  # Log-scale, shift for stability
+        size_log = math.log1p(features.size_adv_ratio)  # Log-scale
         vix_normalized = features.vix / 20.0  # Normalize to ~20 VIX
 
         # Theoretical (linear model) prediction
@@ -404,7 +404,7 @@ class SlippageModel:
 
                 # Compute features
                 vol_norm = f.get("volatility", 0.2) / 0.20
-                size_log = math.log1p(f.get("size_adv_ratio", 0) * 1000)
+                size_log = math.log1p(f.get("size_adv_ratio", 0))
                 vix_norm = f.get("vix", 18) / 20.0
                 is_open = 1.0 if f.get("is_opening", False) else 0.0
                 is_close = 1.0 if f.get("is_closing", False) else 0.0

@@ -76,7 +76,7 @@ class KellyEngine:
                 losses = [t for t in trades if t.get("pnl", 0) <= 0]
 
                 win_rate = len(wins) / len(trades) if trades else 0
-                avg_win = sum(abs(t.get("pnl_pct", 0)) for t in wins) / len(wins) if wins else 0
+                avg_win = sum(t.get("pnl_pct", 0) for t in wins) / len(wins) if wins else 0
                 avg_loss = safe_divide(
                     sum(abs(t.get("pnl_pct", 0)) for t in losses),
                     len(losses),
@@ -89,7 +89,7 @@ class KellyEngine:
                 win_loss_ratio = safe_divide(avg_win, avg_loss, default=0.0)
 
                 # HIGH-002: Cap extreme values to prevent outsized Kelly fractions
-                win_loss_ratio = min(win_loss_ratio, 10.0)
+                win_loss_ratio = max(0.1, min(win_loss_ratio, 10.0))
                 win_rate = min(win_rate, 0.95)
 
                 # Guard against near-zero win/loss ratio

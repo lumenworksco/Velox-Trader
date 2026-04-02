@@ -22,13 +22,13 @@ class TestDailyPnLLock:
         with patch.dict('config.__dict__', {
             'PNL_GAIN_LOCK_PCT': 0.015,
             'PNL_LOSS_HALT_PCT': -0.01,
-            'PNL_GAIN_LOCK_SIZE_MULT': 0.3,
+            'PNL_GAIN_LOCK_SIZE_MULT': 0.70,  # V12: less aggressive gain lock
         }):
             from risk.daily_pnl_lock import DailyPnLLock, LockState
             lock = DailyPnLLock()
             state = lock.update(0.016)
             assert state == LockState.GAIN_LOCK
-            assert lock.get_size_multiplier() == 0.3
+            assert lock.get_size_multiplier() == 0.70  # V12: 70% not 30%
             assert lock.is_trading_allowed()
 
     def test_loss_halt_activation(self):

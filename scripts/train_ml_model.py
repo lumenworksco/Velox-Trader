@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""V11.4: ML Ensemble Training Script.
+"""V12: ML Ensemble Training Script.
 
-Generates training data from historical OHLCV bars, computes 200+ features,
-creates forward-return labels, and trains the LightGBM + XGBoost + CatBoost
-+ RandomForest stacking ensemble.
+Generates training data from historical OHLCV bars, computes 200+ features
+(including fractionally differenced price/volume/OBV), removes spurious
+calendar features, performs automated feature selection (near-zero variance
+and high-correlation removal), creates forward-return labels, and trains the
+LightGBM + XGBoost + CatBoost + RandomForest averaging ensemble.
 
 Usage:
     python3 scripts/train_ml_model.py [--days 252] [--optimize] [--trials 30]
@@ -307,6 +309,79 @@ def compute_features_and_labels(
     return features_df, labels
 
 
+def select_features(
+    features_df: pd.DataFrame,
+    labels: pd.Series,
+    variance_threshold: float = 0.001,
+    correlation_threshold: float = 0.95,
+) -> pd.DataFrame:
+    """Remove low-quality features before training.
+
+    Steps:
+        1. Drop features with near-zero variance (std < variance_threshold).
+        2. Among highly correlated feature pairs (|r| > correlation_threshold),
+           keep the one with higher importance from a quick LightGBM fit.
+
+    Args:
+        features_df: Feature DataFrame.
+        labels: Binary labels (used for importance-based tiebreaking).
+        variance_threshold: Minimum standard deviation to keep a feature.
+        correlation_threshold: Maximum absolute correlation between any pair.
+
+    Returns:
+        Filtered DataFrame with low-quality features removed.
+    """
+    initial_count = len(features_df.columns)
+
+    # --- Step 1: Remove near-zero variance features ---
+    stds = features_df.std()
+    low_var_cols = stds[stds < variance_threshold].index.tolist()
+    if low_var_cols:
+        logger.info("Feature selection: removing %d near-zero variance features: %s",
+                     len(low_var_cols), low_var_cols[:10])
+        features_df = features_df.drop(columns=low_var_cols)
+
+    # --- Step 2: Remove highly correlated features ---
+    # Quick importance ranking via a fast LightGBM fit
+    try:
+        import lightgbm as lgb
+        quick_model = lgb.LGBMClassifier(
+            n_estimators=50, max_depth=4, learning_rate=0.1,
+            verbose=-1, n_jobs=-1,
+        )
+        quick_model.fit(features_df, labels)
+        importances = dict(zip(features_df.columns, quick_model.feature_importances_))
+    except Exception as e:
+        logger.warning("Quick LightGBM fit failed (%s) — using variance as importance proxy", e)
+        importances = features_df.std().to_dict()
+
+    corr_matrix = features_df.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+    to_drop = set()
+    for col in upper.columns:
+        correlated_with = upper.index[upper[col] > correlation_threshold].tolist()
+        for other in correlated_with:
+            if col in to_drop or other in to_drop:
+                continue
+            # Drop the less important feature
+            if importances.get(col, 0) >= importances.get(other, 0):
+                to_drop.add(other)
+            else:
+                to_drop.add(col)
+
+    if to_drop:
+        logger.info("Feature selection: removing %d highly correlated features: %s",
+                     len(to_drop), list(to_drop)[:10])
+        features_df = features_df.drop(columns=list(to_drop))
+
+    removed = initial_count - len(features_df.columns)
+    logger.info("Feature selection complete: %d -> %d features (%d removed)",
+                initial_count, len(features_df.columns), removed)
+
+    return features_df
+
+
 def train_and_save(
     features_df: pd.DataFrame,
     labels: pd.Series,
@@ -409,7 +484,7 @@ def main():
 
     start_time = time.time()
     logger.info("=" * 60)
-    logger.info("VELOX V11.4 ML Model Training")
+    logger.info("VELOX V12 ML Model Training")
     logger.info("=" * 60)
     logger.info("  Symbols: %d", args.symbols)
     logger.info("  Days: %d", args.days)
@@ -435,6 +510,10 @@ def main():
     # Step 2: Compute features and labels
     logger.info("\n--- Step 2: Computing Features & Labels ---")
     features_df, labels = compute_features_and_labels(bars_df, forward_window=10)
+
+    # Step 2b: Feature selection — remove noise features
+    logger.info("\n--- Step 2b: Feature Selection ---")
+    features_df = select_features(features_df, labels)
 
     # Step 3: Train and save
     logger.info("\n--- Step 3: Training Ensemble Model ---")

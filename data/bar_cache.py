@@ -11,17 +11,42 @@ TTL: 60s for intraday bars, 24h for daily bars.
 import logging
 import threading
 import time as _time
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Optional
 
 import pandas as pd
 
+try:
+    import config as _cfg
+    _ET = _cfg.ET
+except Exception:
+    import pytz as _pytz
+    _ET = _pytz.timezone("US/Eastern")
+
 logger = logging.getLogger(__name__)
 
 # TTL constants (seconds)
-_INTRADAY_TTL = 60       # 1 minute for intraday data
-_DAILY_TTL = 86400        # 24 hours for daily data
-_MAX_CACHE_SIZE = 2000    # Max entries before LRU eviction
+_INTRADAY_TTL = 60            # 1 minute for intraday data
+_DAILY_TTL = 86400            # 24 hours for daily data (after market close)
+_DAILY_TTL_INTRADAY = 120    # 2 minutes for daily bars still forming during market hours
+_MAX_CACHE_SIZE = 2000        # Max entries before LRU eviction
+
+
+def _daily_bar_ttl() -> float:
+    """Return the appropriate TTL for daily bars.
+
+    During market hours (before 4pm ET), daily bars are still forming so we
+    use a short 120-second TTL.  After market close, the full 24-hour TTL
+    applies since the bar is final.
+    """
+    try:
+        now_et = datetime.now(_ET).time()
+        market_close = time(16, 0)
+        if now_et < market_close:
+            return _DAILY_TTL_INTRADAY
+    except Exception:
+        pass
+    return _DAILY_TTL
 
 
 class _CacheEntry:
@@ -80,7 +105,7 @@ class BarCache:
         Delegates to data.fetcher.get_daily_bars on cache miss.
         """
         key = (symbol, "Day", days)
-        return self._get_or_fetch(key, ttl=_DAILY_TTL, fetch_fn=self._fetch_daily, symbol=symbol, days=days)
+        return self._get_or_fetch(key, ttl=_daily_bar_ttl(), fetch_fn=self._fetch_daily, symbol=symbol, days=days)
 
     def get_intraday(self, symbol: str, timeframe, start: datetime,
                      end: datetime | None = None) -> pd.DataFrame:
@@ -106,7 +131,7 @@ class BarCache:
         """
         tf_str = str(timeframe)
         is_daily = "day" in tf_str.lower()
-        ttl = _DAILY_TTL if is_daily else _INTRADAY_TTL
+        ttl = _daily_bar_ttl() if is_daily else _INTRADAY_TTL
         key = (symbol, tf_str, start.isoformat() if start else "", limit or 0)
         return self._get_or_fetch(
             key, ttl=ttl, fetch_fn=self._fetch_bars,

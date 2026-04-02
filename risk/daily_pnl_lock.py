@@ -1,10 +1,13 @@
 """Daily P&L Lock — the key mechanism for consistent returns.
 
-Gain Lock: At +1.5% daily P&L, become extremely conservative (30% sizing).
-Loss Halt: At -1.0% daily P&L, halt all new trades.
+Gradual gain lock:
+- At +1.5% daily P&L, reduce sizing to 70% (not 30%).
+Gradual loss reduction:
+- At -0.5% daily P&L, reduce sizing to 60%.
+- At -1.0% daily P&L, halt all new trades.
 
 This creates an asymmetric daily P&L distribution:
-- Good days: capped at ~+1.5-1.8%
+- Good days: capped at ~+1.5-2.0%
 - Bad days: capped at ~-1.0%
 - Result: consistently positive over time.
 """
@@ -20,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 class LockState(str, Enum):
     NORMAL = "NORMAL"
+    LOSS_CAUTION = "LOSS_CAUTION"  # Intermediate: -0.5% daily
     GAIN_LOCK = "GAIN_LOCK"
     LOSS_HALT = "LOSS_HALT"
 
@@ -44,6 +48,7 @@ class DailyPnLLock:
         with self._lock:
             self._day_pnl_pct = day_pnl_pct
 
+            # Loss thresholds (checked most severe first)
             if day_pnl_pct <= config.PNL_LOSS_HALT_PCT:
                 if self.state != LockState.LOSS_HALT:
                     logger.warning(
@@ -51,6 +56,13 @@ class DailyPnLLock:
                         f"(threshold: {config.PNL_LOSS_HALT_PCT:.2%})"
                     )
                 self.state = LockState.LOSS_HALT
+            elif day_pnl_pct <= -0.005:
+                if self.state != LockState.LOSS_CAUTION:
+                    logger.info(
+                        f"PNL LOCK: LOSS CAUTION activated at {day_pnl_pct:.2%} "
+                        f"(threshold: -0.50%)"
+                    )
+                self.state = LockState.LOSS_CAUTION
             elif day_pnl_pct >= config.PNL_GAIN_LOCK_PCT:
                 if self.state != LockState.GAIN_LOCK:
                     logger.info(
@@ -67,13 +79,15 @@ class DailyPnLLock:
         """Get position size multiplier based on current lock state.
 
         Returns:
-            1.0 for NORMAL, 0.30 for GAIN_LOCK, 0.0 for LOSS_HALT
+            1.0 for NORMAL, 0.7 for GAIN_LOCK, 0.6 for LOSS_CAUTION, 0.0 for LOSS_HALT
         """
         with self._lock:
             if self.state == LockState.LOSS_HALT:
                 return 0.0
+            elif self.state == LockState.LOSS_CAUTION:
+                return 0.6
             elif self.state == LockState.GAIN_LOCK:
-                return config.PNL_GAIN_LOCK_SIZE_MULT
+                return 0.7
             return 1.0
 
     def is_trading_allowed(self) -> bool:

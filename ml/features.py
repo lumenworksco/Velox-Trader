@@ -239,8 +239,9 @@ class FeatureEngine:
 
         # --- Price acceleration (second derivative of returns) ---
         if len(closes) >= 12:
-            ret_5 = _returns(closes, 5)
-            ret_5_prev = _returns(closes.iloc[:-5], 5) if len(closes) > 10 else 0.0
+            period = 5
+            ret_5 = _returns(closes, period)
+            ret_5_prev = _returns(closes.iloc[-(period * 2):-period], period) if len(closes) >= period * 2 + 1 else 0.0
             f["price_acceleration_5"] = _safe(ret_5 - ret_5_prev)
         else:
             f["price_acceleration_5"] = 0.0
@@ -302,6 +303,57 @@ class FeatureEngine:
             (closes.iloc[-1] - opens.iloc[-1]) / (highs.iloc[-1] - lows.iloc[-1])
             if (highs.iloc[-1] - lows.iloc[-1]) > 0 else 0.0
         )
+
+        # --- Fractionally differenced features (V12) ---
+        # fracdiff with d=0.7 balances stationarity vs memory preservation.
+        # d=0.4 produced 1458-lag filters (too long for 252-bar daily series).
+        # d=0.7 gives ~30-50 lags which fits typical bar windows.
+        # Fail-open: skip entirely if fracdiff fails (e.g., series too short).
+        try:
+            from ml.fracdiff import FractionalDifferentiator
+            _fd = FractionalDifferentiator()
+            _d = 0.7
+
+            # fracdiff of close prices
+            if len(closes) >= 50:
+                fd_close = _fd.frac_diff(closes, _d)
+                last_val = fd_close.dropna()
+                if len(last_val) > 0:
+                    f["price_fracdiff_close"] = _safe(last_val.iloc[-1])
+                else:
+                    f["price_fracdiff_close"] = 0.0
+            else:
+                f["price_fracdiff_close"] = 0.0
+
+            # fracdiff of volume
+            volumes = bars["volume"]
+            if len(volumes) >= 50:
+                fd_vol = _fd.frac_diff(volumes.astype(float), _d)
+                last_val = fd_vol.dropna()
+                if len(last_val) > 0:
+                    f["price_fracdiff_volume"] = _safe(last_val.iloc[-1])
+                else:
+                    f["price_fracdiff_volume"] = 0.0
+            else:
+                f["price_fracdiff_volume"] = 0.0
+
+            # fracdiff of OBV
+            if len(closes) >= 50:
+                price_diff = closes.diff()
+                obv = (np.sign(price_diff) * bars["volume"]).fillna(0).cumsum()
+                fd_obv = _fd.frac_diff(obv.astype(float), _d)
+                last_val = fd_obv.dropna()
+                if len(last_val) > 0:
+                    f["price_fracdiff_obv"] = _safe(last_val.iloc[-1])
+                else:
+                    f["price_fracdiff_obv"] = 0.0
+            else:
+                f["price_fracdiff_obv"] = 0.0
+        except Exception:
+            logger.debug("Fractional differencing failed for %s — skipping fracdiff features", symbol)
+            f.setdefault("price_fracdiff_close", 0.0)
+            f.setdefault("price_fracdiff_volume", 0.0)
+            f.setdefault("price_fracdiff_obv", 0.0)
 
         return f
 
@@ -554,16 +606,15 @@ class FeatureEngine:
         for d in range(5):
             f[f"cal_dow_{d}"] = 1.0 if dow == d else 0.0
 
-        # --- Month ---
-        f["cal_month"] = float(now.month)
+        # --- Month, Quarter, Day-of-month REMOVED (V12) ---
+        # cal_month, cal_quarter, cal_day_of_month_norm create spurious
+        # correlations: the training-period month/quarter/day is not
+        # predictive in production.  Kept: day-of-week (Monday effect),
+        # minutes-since-open (intraday patterns), and catalyst-proximity
+        # features (earnings, FOMC, opex).
 
-        # --- Quarter ---
-        f["cal_quarter"] = float((now.month - 1) // 3 + 1)
-
-        # --- Day of month (normalized 0-1) ---
         import calendar
         days_in_month = calendar.monthrange(now.year, now.month)[1]
-        f["cal_day_of_month_norm"] = now.day / days_in_month
 
         # --- End of month flag (last 3 trading days) ---
         f["cal_end_of_month"] = 1.0 if now.day >= days_in_month - 3 else 0.0

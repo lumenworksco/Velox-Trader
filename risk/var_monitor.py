@@ -145,11 +145,13 @@ class VaRMonitor:
         # Use the CF-adjusted z-scores for the CVaR pdf evaluation so that
         # heavy tails / skew propagate into the expected-shortfall estimate.
         from math import exp, sqrt, pi
-        phi_95 = exp(-z_95**2 / 2) / sqrt(2 * pi)
+        z_95_base = 1.645  # Use unadjusted z for CVaR PDF
+        phi_95 = exp(-z_95_base**2 / 2) / sqrt(2 * pi)
         cvar_95_pct = -(mu - sigma * phi_95 / 0.05)
         cvar_95 = cvar_95_pct * self._portfolio_value
 
-        phi_99 = exp(-z_99**2 / 2) / sqrt(2 * pi)
+        z_99_base = 2.326
+        phi_99 = exp(-z_99_base**2 / 2) / sqrt(2 * pi)
         cvar_99_pct = -(mu - sigma * phi_99 / 0.01)
         cvar_99 = cvar_99_pct * self._portfolio_value
 

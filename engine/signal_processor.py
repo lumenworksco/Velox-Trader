@@ -243,6 +243,16 @@ try:
 except ImportError:
     pass
 
+# RISK-007: Conformal prediction-based stop validation (fail-open)
+_CONFORMAL_STOPS_AVAILABLE = False
+_conformal_stop_engine = None
+try:
+    from risk.conformal_stops import ConformalStopEngine
+    _conformal_stop_engine = ConformalStopEngine()
+    _CONFORMAL_STOPS_AVAILABLE = True
+except ImportError:
+    pass
+
 
 def _check_data_quality(symbol: str, now) -> float | None:
     """Quick data quality check — returns score 0.0-1.0 or None if unavailable."""
@@ -612,6 +622,22 @@ def process_signals(
             database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "pnl_halt")
         return
 
+    # V11.5: Market breadth filter — if > 85% of signals lean one direction,
+    # reduce position sizes by 50% to avoid crowded-trade risk.
+    breadth_mult = 1.0
+    if len(signals) >= 5:  # Need enough signals for a meaningful breadth reading
+        buy_count = sum(1 for s in signals if s.side == "buy")
+        sell_count = len(signals) - buy_count
+        total = len(signals)
+        max_direction_pct = max(buy_count, sell_count) / total
+        if max_direction_pct > 0.85:
+            breadth_mult = 0.5
+            logger.info(
+                "V11.5: Breadth filter active — %.0f%% signals in one direction "
+                "(buy=%d, sell=%d), reducing sizes by 50%%",
+                max_direction_pct * 100, buy_count, sell_count,
+            )
+
     # Group pairs signals by pair_id for atomic processing
     pair_groups: dict[str, list[Signal]] = {}
     non_pair_signals: list[Signal] = []
@@ -622,10 +648,12 @@ def process_signals(
             non_pair_signals.append(signal)
 
     # Process non-pair signals
+    _batch_accepted_symbols: list[str] = []
     for signal in non_pair_signals:
         _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
-                               var_monitor, corr_limiter)
+                               var_monitor, corr_limiter, batch_accepted=_batch_accepted_symbols,
+                               breadth_mult=breadth_mult)
 
     # Process pairs atomically (both legs or neither)
     # CRIT-009: Lock around pair submission to prevent unhedged exposure
@@ -650,7 +678,7 @@ def process_signals(
                 first_sig, second_sig = pair_signals[0], pair_signals[1]
                 _process_single_signal(first_sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                        news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
-                                       var_monitor, corr_limiter)
+                                       var_monitor, corr_limiter, breadth_mult=breadth_mult)
 
                 if first_sig.symbol in risk.open_trades:
                     # T1-001: Track leg 1 order ID before submitting leg 2
@@ -659,7 +687,7 @@ def process_signals(
 
                     _process_single_signal(second_sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                            news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
-                                           var_monitor, corr_limiter)
+                                           var_monitor, corr_limiter, breadth_mult=breadth_mult)
 
                     # T1-001: If leg 2 failed (rejected or not in open_trades), roll back leg 1
                     if second_sig.symbol not in risk.open_trades:
@@ -692,6 +720,8 @@ def _process_single_signal(
     cross_asset_monitor=None,
     var_monitor=None,
     corr_limiter=None,
+    batch_accepted: list[str] | None = None,
+    breadth_mult: float = 1.0,
 ):
     """Process a single signal through filters and submit if valid."""
     skip_reason = ""
@@ -819,6 +849,10 @@ def _process_single_signal(
     if corr_limiter and signal.strategy != "KALMAN_PAIRS":
         try:
             open_symbols = list(risk.open_trades.keys())
+            # Include symbols already accepted in this batch to prevent
+            # correlated signals slipping through in the same cycle
+            if batch_accepted:
+                open_symbols = list(set(open_symbols + batch_accepted))
             if open_symbols:
                 conc = corr_limiter.check_new_position(signal.symbol, open_symbols)
                 if conc.too_concentrated:
@@ -989,6 +1023,13 @@ def _process_single_signal(
         try:
             with _state.lock:
                 vpin_inst = _vpin_instances.get(signal.symbol)
+            if vpin_inst is None:
+                try:
+                    vpin_inst = _VPIN_Class(signal.symbol)
+                    with _state.lock:
+                        _state.vpin_instances[signal.symbol] = vpin_inst
+                except Exception:
+                    vpin_inst = None
             if vpin_inst is not None:
                 vpin_value = vpin_inst.compute_vpin()
                 if vpin_value > 0.25:
@@ -1072,15 +1113,16 @@ def _process_single_signal(
     #
     # Soft multipliers → conviction score via weighted average:
     _conviction_inputs = [
-        (regime_mult,       0.20, "regime"),        # Market regime alignment
-        (vpin_mult,         0.20, "vpin"),           # Market microstructure toxicity
-        (ml_conf_mult,      0.15, "ml"),             # ML model confidence
-        (cross_asset_mult,  0.10, "cross_asset"),    # Cross-asset signal
-        (llm_mult,          0.10, "llm"),            # LLM scoring
-        (seasonality_mult,  0.08, "seasonality"),    # Time-of-day effects
-        (lead_lag_mult,     0.07, "lead_lag"),        # Lead-lag relationships
-        (edgar_mult,        0.05, "edgar"),           # SEC filing bias
-        (alpha_agent_mult,  0.05, "alpha_agent"),     # Alpha orchestrator
+        (regime_mult,       0.18, "regime"),        # Market regime alignment
+        (vpin_mult,         0.18, "vpin"),           # Market microstructure toxicity
+        (ml_conf_mult,      0.20, "ml"),             # V11.5: ML confidence (increased from 0.15)
+        (breadth_mult,      0.10, "breadth"),        # V11.5: Market breadth filter
+        (cross_asset_mult,  0.08, "cross_asset"),    # Cross-asset signal
+        (llm_mult,          0.08, "llm"),            # LLM scoring
+        (seasonality_mult,  0.06, "seasonality"),    # Time-of-day effects
+        (lead_lag_mult,     0.05, "lead_lag"),        # Lead-lag relationships
+        (edgar_mult,        0.04, "edgar"),           # SEC filing bias
+        (alpha_agent_mult,  0.03, "alpha_agent"),     # Alpha orchestrator
     ]
     # var_mult and news_mult applied directly (risk budget and hard veto respectively)
     weighted_sum = sum(mult * weight for mult, weight, _ in _conviction_inputs)
@@ -1106,6 +1148,37 @@ def _process_single_signal(
         _emit_event(EventTypes.SIGNAL_FILTERED if _EVENTS_AVAILABLE else "signal.filtered",
                     {"symbol": signal.symbol, "reason": skip_reason})
         return
+
+    # RISK-007: Conformal stop validation — tighten stop if data supports it (fail-open)
+    if _CONFORMAL_STOPS_AVAILABLE and _conformal_stop_engine:
+        try:
+            from data.fetcher import get_daily_bars
+            _hist_bars = get_daily_bars(signal.symbol, days=90)
+            if _hist_bars is not None and len(_hist_bars) >= 30:
+                _prices = _hist_bars['close'].tolist()
+                _conformal = _conformal_stop_engine.compute_stop(
+                    prices=_prices,
+                    current_price=signal.entry_price,
+                    side=signal.side,
+                    confidence=0.95,
+                    symbol=signal.symbol,
+                )
+                if _conformal is not None:
+                    # Only tighten — never widen the stop
+                    if signal.side == "buy" and _conformal.stop_price > signal.stop_loss:
+                        logger.info(
+                            "RISK-007: Conformal tightened stop for %s (buy): %.2f -> %.2f",
+                            signal.symbol, signal.stop_loss, _conformal.stop_price,
+                        )
+                        signal.stop_loss = _conformal.stop_price
+                    elif signal.side == "sell" and _conformal.stop_price < signal.stop_loss:
+                        logger.info(
+                            "RISK-007: Conformal tightened stop for %s (sell): %.2f -> %.2f",
+                            signal.symbol, signal.stop_loss, _conformal.stop_price,
+                        )
+                        signal.stop_loss = _conformal.stop_price
+        except Exception as e:
+            logger.debug("RISK-007: Conformal stop failed for %s (fail-open): %s", signal.symbol, e)
 
     # 6b. V10 PROFIT-GAP-001: Transaction cost filter (reject negative-EV trades)
     if _OMS_AVAILABLE and getattr(config, "COST_FILTER_ENABLED", True):
@@ -1176,6 +1249,10 @@ def _process_single_signal(
         _emit_event(EventTypes.ORDER_FAILED if _EVENTS_AVAILABLE else "order.failed",
                     {"symbol": signal.symbol, "strategy": signal.strategy})
         return
+
+    # Track accepted symbol for intra-batch correlation checks
+    if batch_accepted is not None:
+        batch_accepted.append(signal.symbol)
 
     # Update OMS with broker order ID
     if oms_order and _order_manager:

@@ -236,19 +236,25 @@ def _compute_result(strategy: str, trades: list[BacktestTrade],
         return BacktestResult(strategy=strategy)
 
     total_return = (portfolio_history[-1] - initial_capital) / initial_capital
-    # HIGH-027: Derive lookback from actual data length instead of hardcoded 126
-    days = min(len(portfolio_history) // 4, 252) if len(portfolio_history) > 4 else len(portfolio_history)
-    days = max(days, 1)  # Guard against zero
-    annualized = (1 + total_return) ** (252 / days) - 1
 
-    # Daily returns for Sharpe
+    # Compute actual trading days from the trade date range
+    trade_dates = set()
+    for t in trades:
+        if t.entry_time:
+            trade_dates.add(t.entry_time.date() if hasattr(t.entry_time, 'date') else t.entry_time)
+        if t.exit_time:
+            trade_dates.add(t.exit_time.date() if hasattr(t.exit_time, 'date') else t.exit_time)
+    trading_days = max(len(trade_dates), 1)
+    annualized = (1 + total_return) ** (252 / trading_days) - 1
+
+    # Daily returns for Sharpe — annualize using actual trading days
     arr = np.array(portfolio_history)
     daily_returns = np.diff(arr) / arr[:-1]
     daily_rf = config.BACKTEST_RISK_FREE_RATE / 252
     excess = daily_returns - daily_rf
     sharpe = 0.0
     if len(excess) > 1 and np.std(excess) > 0:
-        sharpe = float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(252))
+        sharpe = float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(trading_days))
 
     # Win rate
     winners = [t for t in trades if t.pnl > 0]

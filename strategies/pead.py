@@ -147,14 +147,30 @@ class PEADStrategy:
                 continue
 
             try:
-                # Time stop: max hold days
+                # Time stop: max hold days (5), with extension to 10 if profit > 2%
                 if hasattr(trade, "entry_time") and trade.entry_time:
                     hold_days = (now - trade.entry_time).days
-                    if hold_days >= config.PEAD_HOLD_DAYS_MAX:
+                    # Check if trade is profitable enough to extend hold
+                    max_hold = config.PEAD_HOLD_DAYS_MAX  # 5 days default
+                    try:
+                        from data import get_snapshot
+                        snap = get_snapshot(symbol)
+                        cur_price = float(snap.latest_trade.price) if snap and snap.latest_trade else None
+                        if cur_price and trade.entry_price > 0:
+                            if trade.side == "buy":
+                                cur_pnl = (cur_price - trade.entry_price) / trade.entry_price
+                            else:
+                                cur_pnl = (trade.entry_price - cur_price) / trade.entry_price
+                            # Extend to 10 days if profit > 2%
+                            if cur_pnl > 0.02:
+                                max_hold = 10
+                    except Exception:
+                        pass
+                    if hold_days >= max_hold:
                         exits.append({
                             "symbol": symbol,
                             "action": "full",
-                            "reason": f"PEAD time stop ({hold_days}d >= {config.PEAD_HOLD_DAYS_MAX}d)",
+                            "reason": f"PEAD time stop ({hold_days}d >= {max_hold}d)",
                         })
                         continue
 

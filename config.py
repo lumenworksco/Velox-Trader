@@ -165,10 +165,10 @@ MR_MIN_STOP_PCT = 0.005            # Minimum stop distance = 0.5% of price (prev
 
 # --- VWAP Mean Reversion ---
 VWAP_OU_ZSCORE_MIN   = 1.0        # OU z-score confirmation for entries
-VWAP_MAX_SPREAD_PCT  = 0.002      # Skip if bid-ask spread > 0.2% (was 0.1% — too restrictive)
-VWAP_VOLUME_RATIO    = 0.8        # Volume ratio vs 20-bar average
+VWAP_MAX_SPREAD_PCT  = 0.0015     # Skip if bid-ask spread > 0.15% — tighter quality filter
+VWAP_VOLUME_RATIO    = 1.0        # Volume ratio vs 20-bar average — require above-average volume
 MAX_INTRADAY_MOVE_PCT = 0.03      # Skip if stock moved > 3% today
-VWAP_BAND_STD        = 2.0        # Standard deviation multiplier for VWAP bands
+VWAP_BAND_STD        = 1.5        # Standard deviation multiplier for VWAP bands — tighter bands, more entries
 VWAP_RSI_OVERSOLD    = 45         # RSI below this = oversold (buy signal, raised from 40)
 VWAP_RSI_OVERBOUGHT  = 70         # RSI above this = overbought (short signal)
 VWAP_CONFIRMATION_BARS = 1        # Bars confirming bounce (1 = disabled)
@@ -176,13 +176,13 @@ VWAP_STOP_EXTENSION  = 0.5        # Stop extension beyond band (in std devs)
 VWAP_MIN_STOP_PCT    = 0.01       # Minimum 1.0% stop distance (was 0.5%)
 
 # --- Kalman Pairs Trading ---
-PAIRS_ZSCORE_ENTRY = 2.0
+PAIRS_ZSCORE_ENTRY = 1.5
 PAIRS_ZSCORE_EXIT = 0.2
 PAIRS_ZSCORE_STOP = 3.0
 PAIRS_MAX_HOLD_DAYS = 10
 PAIRS_MAX_ACTIVE = 15
-PAIRS_MIN_CORRELATION = 0.70       # Lowered from 0.80 — find more pairs
-PAIRS_COINT_PVALUE = 0.10          # Relaxed from 0.05 — accept more pairs (still statistically meaningful)
+PAIRS_MIN_CORRELATION = 0.80       # Tightened from 0.70 — higher quality pairs only
+PAIRS_COINT_PVALUE = 0.05          # Tightened from 0.10 — require stronger cointegration
 KALMAN_DELTA = 1e-4
 KALMAN_OBS_NOISE = 0.001
 PAIRS_TP_PCT = 0.015   # V10: 1.5% take-profit (was 0.5% — negative EV after costs)
@@ -190,24 +190,24 @@ PAIRS_SL_PCT = 0.010   # V10: 1.0% stop-loss (was 1.5% — gives 1.5:1 R/R)
 
 # --- Opening Range Breakout ---
 ORB_ENABLED          = True
-ORB_VOLUME_RATIO     = 1.3        # Volume confirmation ratio
+ORB_VOLUME_RATIO     = 2.0        # Volume confirmation ratio — require strong volume on breakout
 ORB_MAX_GAP_PCT      = 0.04       # Skip if gap > 4%
 ORB_MAX_RANGE_PCT    = 0.035      # Skip if range > 3.5%
 ORB_MIN_STOP_PCT     = 0.008      # Minimum 0.8% stop distance (was 0.3%)
 ORB_SCAN_SYMBOLS     = 15         # Top N by morning volume
 ORB_ACTIVE_UNTIL     = time(12, 30)   # Extended from 11:30 — more signal window
-ORB_BREAKOUT_BUFFER  = 0.001      # 0.1% confirmation buffer above/below ORB range
-ORB_TP_MULT          = 1.5        # Take profit = entry ± 1.5x ORB range
-ORB_SL_MULT          = 0.5        # Stop loss = entry ∓ 0.5x ORB range
+ORB_BREAKOUT_BUFFER  = 0.0025     # 0.25% confirmation buffer above/below ORB range — reduce fakeouts
+ORB_TP_MULT          = 2.0        # Take profit = entry ± 2.0x ORB range — wider target
+ORB_SL_MULT          = 0.7        # Stop loss = entry ∓ 0.7x ORB range — wider stop, fewer whipsaws
 ORB_TIME_STOP_HOURS  = 2          # Close after 2 hours
 
 # --- Micro Momentum ---
-MICRO_SPY_VOL_SPIKE_MULT = 1.5     # Was 2.0 — detect more micro-events
-MICRO_SPY_MIN_MOVE_PCT = 0.0008    # Was 0.001 — 0.08% SPY move triggers event
-MICRO_MAX_HOLD_MINUTES = 30          # V11.3: Extended from 15 to 30 — trailing stop manages risk
+MICRO_SPY_VOL_SPIKE_MULT = 2.0     # Tightened from 1.5 — require stronger volume spike
+MICRO_SPY_MIN_MOVE_PCT = 0.0015    # Tightened from 0.0008 — 0.15% SPY move triggers event
+MICRO_MAX_HOLD_MINUTES = 20          # Reduced from 30 to 20 — shorter hold, capture fast moves
 MICRO_STOP_PCT = 0.01                # Was 0.003 — 1% stop survives noise on beta=2 stocks
 MICRO_TARGET_PCT = 0.02              # Was 0.006 — 2% target keeps 2:1 R/R
-MICRO_MAX_TRADES_PER_EVENT = 2       # Was 3 — fewer, higher-conviction trades
+MICRO_MAX_TRADES_PER_EVENT = 4       # Increased from 2 — capture more momentum on confirmed events
 MICRO_MAX_DAILY_GAIN_DISABLE = 0.015
 MICRO_TOP_BETA_STOCKS = 5
 MICRO_EVENT_COOLDOWN_SEC = 900    # 15-min cooldown between events
@@ -226,11 +226,11 @@ MICRO_BETA_TABLE = {
 # --- Post-Earnings Announcement Drift ---
 PEAD_ENABLED = True
 PEAD_MIN_SURPRISE_PCT = 3.0        # Lowered from 5.0 — capture more earnings plays
-PEAD_MIN_VOLUME_RATIO = 1.5       # Lowered from 2.0 — less restrictive volume gate
+PEAD_MIN_VOLUME_RATIO = 2.0       # Tightened from 1.5 — require strong volume confirmation
 PEAD_HOLD_DAYS_MIN = 10
-PEAD_HOLD_DAYS_MAX = 20
+PEAD_HOLD_DAYS_MAX = 5             # Shortened from 20 — most drift happens in first 5 days
 PEAD_TAKE_PROFIT = 0.05
-PEAD_STOP_LOSS = 0.03
+PEAD_STOP_LOSS = 0.02              # Tightened from 3% to 2% — cut losses faster
 PEAD_MAX_POSITIONS = 5
 PEAD_POSITION_SIZE_PCT = 0.02
 
@@ -312,7 +312,7 @@ BAYESIAN_KELLY_ENABLED = True           # V11.4: Enable regime-weighted Kelly fr
 # --- Daily P&L Controls ---
 PNL_GAIN_LOCK_PCT = 0.015
 PNL_LOSS_HALT_PCT = -0.010
-PNL_GAIN_LOCK_SIZE_MULT = 0.30
+PNL_GAIN_LOCK_SIZE_MULT = 0.70
 
 # --- Re-entry Cooldown ---
 REENTRY_COOLDOWN_MIN = 30          # Block re-entry for 30 min after stop-loss (was 15 — too short)
