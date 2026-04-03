@@ -32,6 +32,45 @@ except ImportError:
 # Beta table — sourced from config for tunability
 STOCK_BETAS = config.MICRO_BETA_TABLE
 
+# V12 AUDIT: Dynamic beta estimation cache {symbol: (date_str, beta)}
+_dynamic_beta_cache: dict[str, tuple[str, float]] = {}
+
+
+def _get_dynamic_beta(symbol: str, fallback_beta: float) -> float:
+    """Compute 60-day rolling beta vs SPY. Fall back to config if unavailable.
+
+    Results are cached per trading day to avoid repeated API calls.
+    """
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+
+    # Return cached value if computed today
+    if symbol in _dynamic_beta_cache:
+        cached_date, cached_beta = _dynamic_beta_cache[symbol]
+        if cached_date == today_str:
+            return cached_beta
+
+    try:
+        from data import get_bars
+        spy_bars = get_bars("SPY", timeframe="1Day", limit=60)
+        sym_bars = get_bars(symbol, timeframe="1Day", limit=60)
+        if spy_bars is not None and sym_bars is not None and len(spy_bars) >= 20 and len(sym_bars) >= 20:
+            spy_ret = spy_bars['close'].pct_change().dropna()
+            sym_ret = sym_bars['close'].pct_change().dropna()
+            # Align indices
+            aligned = spy_ret.align(sym_ret, join='inner')
+            if len(aligned[0]) >= 20:
+                cov = np.cov(aligned[1], aligned[0])
+                beta = cov[0, 1] / max(cov[1, 1], 1e-10)
+                beta = max(0.5, min(3.0, beta))  # Clamp to reasonable range
+                _dynamic_beta_cache[symbol] = (today_str, beta)
+                return beta
+    except Exception:
+        pass
+
+    _dynamic_beta_cache[symbol] = (today_str, fallback_beta)
+    return fallback_beta
+
 
 class IntradayMicroMomentum:
     """Trade high-beta stocks during economic data release momentum.
@@ -143,8 +182,10 @@ class IntradayMicroMomentum:
             return signals
 
         # Select top-beta stocks not already triggered
+        # V12 AUDIT: Dynamic beta estimation with hardcoded fallback
         candidates = [
-            (sym, beta) for sym, beta in STOCK_BETAS.items()
+            (sym, _get_dynamic_beta(sym, beta))
+            for sym, beta in STOCK_BETAS.items()
             if sym not in self._triggered_symbols
             and sym not in config.LEVERAGED_ETFS
         ]

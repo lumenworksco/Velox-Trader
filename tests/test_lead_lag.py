@@ -432,21 +432,34 @@ class TestRollingLeadLag:
 # ===================================================================
 
 class TestGetLeadLagSignal:
+    """Tests for T5-013 get_lead_lag_signal().
+
+    The function does `import config as _cfg` locally, so we patch
+    the config module in sys.modules to control its attributes.
+    """
+
     def setup_method(self):
         clear_lead_lag_cache()
 
+    def _mock_config(self, **attrs):
+        """Create a mock config module with given attributes."""
+        mock_cfg = MagicMock()
+        for k, v in attrs.items():
+            setattr(mock_cfg, k, v)
+        return mock_cfg
+
     def test_disabled_returns_zero(self):
         """When LEAD_LAG_ENABLED is False, returns 0.0."""
-        with patch("analytics.lead_lag.config") as mock_cfg:
-            mock_cfg.LEAD_LAG_ENABLED = False
+        mock_cfg = self._mock_config(LEAD_LAG_ENABLED=False)
+        with patch.dict("sys.modules", {"config": mock_cfg}):
             assert get_lead_lag_signal("AAPL") == 0.0
 
     def test_active_bias_returned(self):
         """When an active bias exists and hasn't expired, it is returned."""
         with _bias_lock:
             _active_biases["AAPL"] = (0.15, time.time() + 600)
-        with patch("analytics.lead_lag.config") as mock_cfg:
-            mock_cfg.LEAD_LAG_ENABLED = True
+        mock_cfg = self._mock_config(LEAD_LAG_ENABLED=True)
+        with patch.dict("sys.modules", {"config": mock_cfg}):
             result = get_lead_lag_signal("AAPL")
         assert result == 0.15
 
@@ -454,25 +467,30 @@ class TestGetLeadLagSignal:
         """An expired bias is cleared and not returned."""
         with _bias_lock:
             _active_biases["MSFT"] = (0.10, time.time() - 10)
-        with patch("analytics.lead_lag.config") as mock_cfg:
-            mock_cfg.LEAD_LAG_ENABLED = True
-            mock_cfg.SECTOR_MAP = {}
+        mock_cfg = self._mock_config(LEAD_LAG_ENABLED=True, SECTOR_MAP={})
+        with patch.dict("sys.modules", {"config": mock_cfg}):
             result = get_lead_lag_signal("MSFT")
         assert result == 0.0
 
     def test_no_sector_mapping_returns_zero(self):
         """When symbol has no sector ETF mapping, returns 0.0."""
-        with patch("analytics.lead_lag.config") as mock_cfg:
-            mock_cfg.LEAD_LAG_ENABLED = True
-            mock_cfg.SECTOR_MAP = {}
+        mock_cfg = self._mock_config(LEAD_LAG_ENABLED=True, SECTOR_MAP={})
+        with patch.dict("sys.modules", {"config": mock_cfg}):
             result = get_lead_lag_signal("AAPL")
         assert result == 0.0
 
     def test_never_raises(self):
         """get_lead_lag_signal never raises (fail-open)."""
-        with patch("analytics.lead_lag.config", side_effect=Exception("boom")):
+        # Force an import error by removing config from modules
+        import sys
+        saved = sys.modules.get("config")
+        sys.modules["config"] = None  # This will cause ImportError
+        try:
             result = get_lead_lag_signal("AAPL")
-        assert result == 0.0
+            assert result == 0.0
+        finally:
+            if saved is not None:
+                sys.modules["config"] = saved
 
 
 class TestGetLeadLagSizeMultiplier:

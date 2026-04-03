@@ -42,16 +42,27 @@ class KillSwitch:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _write_queue(symbols: list[str], reason: str) -> None:
-        """Persist the list of symbols still pending close to disk."""
+    def _write_queue(symbols: list[str], reason: str = "") -> None:
+        """Write positions to kill switch queue file atomically."""
         try:
+            import tempfile
             Path(_QUEUE_FILE).parent.mkdir(parents=True, exist_ok=True)
-            with open(_QUEUE_FILE, "w") as f:
-                json.dump({"symbols": symbols, "reason": reason,
-                           "ts": datetime.now(config.ET).isoformat()}, f)
-            logger.debug(f"Kill-switch queue written: {len(symbols)} symbols")
+            data = {"symbols": symbols, "reason": reason, "timestamp": _time.time()}
+            # Atomic write: write to temp file, then rename (atomic on most filesystems)
+            dir_name = os.path.dirname(_QUEUE_FILE) or "."
+            fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f)
+                os.replace(tmp_path, _QUEUE_FILE)  # Atomic rename
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
-            logger.error(f"Failed to write kill-switch queue: {e}")
+            logger.error("V12 AUDIT: Kill switch queue write failed: %s", e)
 
     @staticmethod
     def _remove_from_queue(symbol: str) -> None:
@@ -94,13 +105,24 @@ class KillSwitch:
             f"from reason={reason}). Attempting to close..."
         )
         from execution import close_position
+        _failed_closes = []
         for symbol in list(symbols):
             try:
-                close_position(symbol, reason=f"kill_switch_recovery_{reason}")
-                self._remove_from_queue(symbol)
-                logger.info(f"Kill-switch recovery: closed {symbol}")
+                success = close_position(symbol, reason=f"kill_switch_recovery_{reason}")
+                if not success:
+                    logger.critical("V12 AUDIT: Kill switch FAILED to close %s — manual intervention required", symbol)
+                    _failed_closes.append(symbol)
+                else:
+                    self._remove_from_queue(symbol)
+                    logger.info(f"Kill-switch recovery: closed {symbol}")
             except Exception as e:
                 logger.error(f"Kill-switch recovery: failed to close {symbol}: {e}")
+                _failed_closes.append(symbol)
+        if _failed_closes:
+            logger.critical(
+                "V12 AUDIT: Kill switch recovery: %d positions FAILED to close: %s — MANUAL INTERVENTION REQUIRED",
+                len(_failed_closes), _failed_closes,
+            )
 
     def activate(self, reason: str = "manual", risk_manager=None, order_manager=None):
         """Activate kill switch: cancel all orders and close all positions.
@@ -139,7 +161,11 @@ class KillSwitch:
                 batch = symbols[batch_start:batch_start + KILL_SWITCH_BATCH_SIZE]
                 for symbol in batch:
                     try:
-                        close_position(symbol, reason="kill_switch")
+                        success = close_position(symbol, reason="kill_switch")
+                        if not success:
+                            logger.critical("V12 AUDIT: Kill switch FAILED to close %s — manual intervention required", symbol)
+                            failed_closes.append(symbol)
+                            continue
                         trade = risk_manager.open_trades.get(symbol)
                         if trade:
                             risk_manager.close_trade(

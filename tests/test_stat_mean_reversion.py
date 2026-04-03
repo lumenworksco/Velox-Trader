@@ -281,23 +281,31 @@ class TestCheckExits:
         assert "partial" in exits[0]["reason"]
 
     @patch("strategies.stat_mean_reversion.get_intraday_bars")
-    @patch("strategies.stat_mean_reversion.compute_zscore")
     def test_check_exits_stop(
-        self, mock_zscore, mock_bars, strategy
+        self, mock_bars, strategy
     ):
-        """Stop exit when z-score diverges beyond MR_ZSCORE_STOP."""
+        """Stop exit when price diverges far from mean (z-score > MR_ZSCORE_STOP).
+
+        V12 AUDIT: check_exits now computes z-score using price_sigma
+        (std of price levels) consistently with scan(). The mock bars must
+        produce a z-score beyond the stop threshold (2.5).
+        """
+        # Set up OU params with mu=100.0
         strategy.ou_params = {
             "AAPL": {'kappa': 0.15, 'mu': 100.0, 'sigma': 1.5, 'half_life': 0.5}
         }
 
-        bars = _make_intraday_bars(5, base_price=100.0)
+        # Create bars where price has drifted far below mean
+        # Price std ~1.0, so z-score = (price - mu) / price_sigma
+        # For z < -2.5 (stop threshold): need price < 100 - 2.5 * price_sigma
+        # With bars around 95.0 and std ~1.0: z = (95 - 100) / 1.0 = -5.0
+        bars = _make_intraday_bars(5, base_price=95.0)
         mock_bars.return_value = bars
-        mock_zscore.return_value = -3.0  # Far below mean -> stop for long
 
         trade = SimpleNamespace(
             strategy="STAT_MR", side="buy",
             entry_time=datetime(2026, 3, 13, 10, 0, tzinfo=ET),
-            stop_loss=102.0,  # Last close ~101.01 will be <= 102 → triggers stop
+            stop_loss=96.0,
         )
 
         now = datetime(2026, 3, 13, 10, 30, tzinfo=ET)

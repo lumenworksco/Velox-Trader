@@ -142,6 +142,15 @@ class ORBStrategyV2:
             return signals
 
         for symbol, orb in self.opening_ranges.items():
+            # V12 AUDIT: Skip symbols with upcoming earnings (gap risk)
+            try:
+                from earnings import has_earnings_soon
+                if has_earnings_soon(symbol, days=2):
+                    logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
+                    continue
+            except Exception:
+                pass  # Fail-open
+
             if not orb.get("valid"):
                 continue
 

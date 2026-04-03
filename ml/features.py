@@ -13,6 +13,8 @@ import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import config
+
 import numpy as np
 import pandas as pd
 
@@ -134,6 +136,48 @@ class FeatureEngine:
                 features.update(feats)
             except Exception:
                 logger.exception("Error computing %s for %s", method_name, symbol)
+
+        # V12 AUDIT: Core feature selection — reduce from 200+ to ~50 high-signal features
+        # Remove redundant features that are highly correlated with each other
+        CORE_FEATURES = {
+            # Price features (8)
+            'return_1', 'return_5', 'return_20',
+            'momentum_10', 'momentum_20',
+            'rsi_14', 'rsi_7',
+            'price_position_52w',
+            # Volatility (4)
+            'realized_vol_20', 'atr_14_pct',
+            'bb_width_20', 'vol_ratio_5_20',
+            # Volume (4)
+            'volume_ratio_20', 'obv_slope_10',
+            'volume_zscore', 'relative_volume',
+            # Moving averages (4)
+            'price_vs_sma_20', 'price_vs_sma_50',
+            'sma_5_vs_20', 'ema_12_vs_26',
+            # Trend (4)
+            'adx_14', 'macd_histogram',
+            'trend_strength', 'linear_regression_slope',
+            # Cross-asset (4)
+            'beta_spy_20', 'correlation_spy_20',
+            'relative_strength_sector', 'vix_level',
+            # Market regime (3)
+            'regime_state', 'regime_probability',
+            'vix_rate_of_change',
+            # Microstructure (3)
+            'spread_bps', 'vpin_score', 'order_imbalance',
+            # Calendar (2)
+            'minutes_since_open', 'day_of_week',
+        }
+
+        # Filter to core features if available
+        if getattr(config, 'ML_CORE_FEATURES_ONLY', True):
+            core_cols = [c for c in features.columns if c in CORE_FEATURES] if hasattr(features, 'columns') else list(CORE_FEATURES)
+            if isinstance(features, dict):
+                features = {k: v for k, v in features.items() if k in CORE_FEATURES}
+            elif hasattr(features, 'columns'):
+                available = [c for c in CORE_FEATURES if c in features.columns]
+                if len(available) >= 20:  # Only filter if enough core features exist
+                    features = features[available]
 
         return features
 

@@ -15,7 +15,7 @@ import pandas as pd
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 import config
-from data import get_intraday_bars, get_daily_bars
+from data import get_intraday_bars, get_daily_bars, get_snapshot
 from strategies.base import Signal
 from analytics.ou_tools import fit_ou_params, compute_zscore
 from analytics.hurst import hurst_exponent
@@ -152,6 +152,15 @@ class StatMeanReversion:
 
         for symbol in self.universe:
             try:
+                # V12 AUDIT: Skip symbols with upcoming earnings (gap risk)
+                try:
+                    from earnings import has_earnings_soon
+                    if has_earnings_soon(symbol, days=2):
+                        logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
+                        continue
+                except Exception:
+                    pass  # Fail-open
+
                 ou = self.ou_params.get(symbol)
                 if not ou:
                     continue
@@ -207,6 +216,20 @@ class StatMeanReversion:
                 vwap = compute_vwap(bars)
                 if vwap is None:
                     continue
+
+                # V12 AUDIT: Bid-ask spread quality gate (consistent with VWAP strategy)
+                try:
+                    snap = get_snapshot(symbol)
+                    if snap and hasattr(snap, 'latest_quote') and snap.latest_quote:
+                        bid = float(snap.latest_quote.bid_price)
+                        ask = float(snap.latest_quote.ask_price)
+                        if bid > 0 and ask > bid:
+                            spread_pct = (ask - bid) / ((bid + ask) / 2)
+                            if spread_pct > 0.002:  # Max 0.2% spread
+                                logger.debug("V12 AUDIT: %s spread %.3f%% > 0.2%% — skipping", symbol, spread_pct * 100)
+                                continue
+                except Exception:
+                    pass  # Fail-open
 
                 # === LONG entry: price below mean ===
                 # MR works better in downtrends — use LOWER threshold in BEARISH (more entries)
@@ -325,15 +348,19 @@ class StatMeanReversion:
                 if bars is None or bars.empty:
                     continue
 
-                price = bars["close"].iloc[-1]
+                close = bars["close"]
+                price = close.iloc[-1]
 
-                # V12 2.4: OU sigma zero guard — skip exit check if sigma ~0
-                if ou['sigma'] < 1e-10:
-                    logger.debug(f"MR exit skip {symbol}: OU sigma ~0")
+                # V12 AUDIT: Use price_sigma (std of price levels) consistently
+                # with entry logic. OU sigma is std of price CHANGES which is
+                # too small for meaningful z-score thresholds on exits.
+                price_sigma = float(close.iloc[:-1].std()) if len(close) > 2 else ou['sigma']
+                if price_sigma < 1e-10:
+                    logger.debug(f"MR exit skip {symbol}: price_sigma ~0")
                     continue
 
-                # Compute current z-score
-                zscore = compute_zscore(price, ou['mu'], ou['sigma'])
+                # Compute current z-score using price_sigma (consistent with scan())
+                zscore = (price - ou['mu']) / price_sigma
 
                 # Time stop: 2x half_life
                 if hasattr(trade, 'entry_time') and trade.entry_time:
@@ -351,6 +378,15 @@ class StatMeanReversion:
                         continue
 
                 if trade.side == "buy":
+                    # V12 AUDIT: Z-score stop — diverging further from mean
+                    if zscore <= -config.MR_ZSCORE_STOP:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR z-stop z={zscore:.2f} (< -{config.MR_ZSCORE_STOP})",
+                        })
+                        continue
+
                     # Long: entered at negative z-score, want z to revert toward 0 and beyond
                     # V11.4: Enhanced overshoot capture with momentum continuation
                     if zscore >= config.MR_ZSCORE_EXIT_PARTIAL:
@@ -392,6 +428,15 @@ class StatMeanReversion:
                         })
 
                 elif trade.side == "sell":
+                    # V12 AUDIT: Z-score stop — diverging further from mean (short)
+                    if zscore >= config.MR_ZSCORE_STOP:
+                        exits.append({
+                            "symbol": symbol,
+                            "action": "full",
+                            "reason": f"MR z-stop z={zscore:.2f} (> {config.MR_ZSCORE_STOP})",
+                        })
+                        continue
+
                     # Short: entered at positive z-score, want z to revert toward 0 and beyond
                     if zscore <= -config.MR_ZSCORE_EXIT_PARTIAL:
                         exits.append({

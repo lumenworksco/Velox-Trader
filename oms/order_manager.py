@@ -76,20 +76,21 @@ class OrderManager:
     @staticmethod
     def _generate_idempotency_key(symbol: str, side: str, qty: int,
                                    strategy: str) -> str:
-        """BUG-012 / V12 11.2: Auto-generate idempotency key from order parameters.
+        """Generate unique idempotency key using content hash + monotonic nonce.
 
-        Uses a hash of (symbol, side, qty, strategy) combined with a 5-second
+        Uses a hash of (symbol, side, qty, strategy) combined with a 2-second
         timestamp bucket so that identical orders within the same window are
-        treated as duplicates. The hash is deterministic across restarts.
+        treated as duplicates. Narrower window (was 5s) reduces race condition
+        risk for rapid sequential orders.
 
         HIGH-024: Uses time.monotonic() to avoid issues with system clock changes.
         """
         import time
-        timestamp_bucket = int(time.monotonic()) // 5
-        # V12 11.2: Include a stable hash of order parameters
-        raw = f"{symbol}|{side}|{qty}|{strategy}"
-        param_hash = hashlib.sha256(raw.encode()).hexdigest()[:12]
-        return f"{param_hash}_{timestamp_bucket}"
+        # Content-based: same order params within 2-second window get same key
+        content = f"{symbol}:{side}:{qty}:{strategy}"
+        time_bucket = int(time.monotonic() * 1000) // 2000  # 2-second buckets (was 5s)
+        raw = f"{content}:{time_bucket}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def create_order(self, symbol: str, strategy: str, side: str,
                      order_type: str, qty: int, limit_price: float = 0.0,

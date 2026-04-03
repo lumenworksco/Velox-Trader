@@ -52,6 +52,12 @@ try:
     from engine.exit_processor import check_advanced_exits as _check_advanced_exits
 except ImportError:
     _check_advanced_exits = None
+# V12 AUDIT: Exit orchestrator as primary exit system (fail-open)
+try:
+    from engine.exit_orchestrator import get_exit_orchestrator
+    _exit_orchestrator = get_exit_orchestrator()
+except ImportError:
+    _exit_orchestrator = None
 from engine.scanner import scan_all_strategies, check_all_exits, run_beta_neutralization
 from engine.daily_tasks import daily_reset, weekly_tasks, eod_close, backup_database
 # V12 BONUS: Profit maximization engine
@@ -832,6 +838,7 @@ def main():
     reconciler = mods.get("reconciler")
 
     last_cross_asset_update = now_et()
+    last_correlation_refresh = now_et()  # V12 AUDIT: Track intraday correlation recompute
     last_watchdog_check = now_et()
     last_reconciliation = now_et()
 
@@ -990,15 +997,6 @@ def main():
         except Exception as e:
             logger.warning(f"V12 2.5: CorporateActionDetector init failed (fail-open): {e}")
 
-    # --- V12 3.1: Enhanced reconciler from Container (fail-open) ---
-    v11_reconciler = None
-    if V11Reconciler:
-        try:
-            v11_reconciler = _ctr.get("v11_reconciler")
-            logger.info("V12 3.1: V11 PositionReconciler initialized")
-        except Exception as e:
-            logger.warning(f"V12 3.1: V11 PositionReconciler init failed (fail-open): {e}")
-
     # Feature flags
     features = ["MR40%", "VWAP20%", "PAIRS20%", "PEAD10%", "ORB5%", "MICRO5%"]
     if config.ALLOW_SHORT:
@@ -1016,6 +1014,16 @@ def main():
     # The fail-open pattern is preserved: each module is individually wrapped.
     from container import Container as _Container
     _ctr = _Container.instance()
+
+    # --- V12 3.1: Enhanced reconciler from Container (fail-open) ---
+    # V12 AUDIT: Moved after _ctr initialization to avoid NameError
+    v11_reconciler = None
+    if V11Reconciler:
+        try:
+            v11_reconciler = _ctr.get("v11_reconciler")
+            logger.info("V12 3.1: V11 PositionReconciler initialized")
+        except Exception as e:
+            logger.warning(f"V12 3.1: V11 PositionReconciler init failed (fail-open): {e}")
 
     _V11_MODULE_FEATURES = [
         # (container_key, feature_tag)
@@ -1334,6 +1342,7 @@ def main():
 
                         # V10: Tiered circuit breaker (replaces single-threshold)
                         skip_scan = False
+                        day_pnl_pct = 0.0  # V12 AUDIT: initialize before conditional block (used unconditionally later)
                         if tiered_cb:
                             day_pnl_pct = risk.day_pnl / max(risk.current_equity, 1)
                             tier = tiered_cb.update(day_pnl_pct, current)
@@ -1510,19 +1519,50 @@ def main():
                             )
 
                         # 5. Check strategy exits (always runs — uses cached prices if feed down)
-                        check_all_exits(
-                            current, risk, stat_mr, kalman_pairs, micro_mom,
-                            orb_strategy, pead_strategy, ws_monitor,
-                        )
-
-                        # 5b. V12: Advanced exits (profit tiers, dead signal, scale-out)
-                        if _check_advanced_exits is not None:
+                        # V12 AUDIT: Use ExitOrchestrator as primary exit system
+                        if _exit_orchestrator is not None:
                             try:
-                                adv_exits = _check_advanced_exits(risk, current)
-                                if adv_exits:
-                                    handle_strategy_exits(adv_exits, risk, current, ws_monitor)
-                            except Exception as e:
-                                logger.debug(f"V12: Advanced exits check failed (non-fatal): {e}")
+                                from risk import get_vix_level as _get_vix_exit
+                                exit_actions = _exit_orchestrator.check_exits(
+                                    positions=risk.open_trades,
+                                    now=current,
+                                    vix_level=_get_vix_exit(),
+                                )
+                                if exit_actions:
+                                    for action in exit_actions:
+                                        try:
+                                            handle_strategy_exits([action], risk, current, ws_monitor)
+                                        except Exception as ea:
+                                            logger.error("ExitOrchestrator action failed for %s: %s", getattr(action, 'symbol', '?'), ea)
+                                    logger.info("V12 AUDIT: ExitOrchestrator processed %d exit actions", len(exit_actions))
+                            except Exception as oe:
+                                logger.warning("V12 AUDIT: ExitOrchestrator failed, falling back to legacy exits: %s", oe)
+                                # Fallback to legacy
+                                check_all_exits(
+                                    current, risk, stat_mr, kalman_pairs, micro_mom,
+                                    orb_strategy, pead_strategy, ws_monitor,
+                                )
+                                if _check_advanced_exits is not None:
+                                    try:
+                                        adv_exits = _check_advanced_exits(risk, current)
+                                        if adv_exits:
+                                            handle_strategy_exits(adv_exits, risk, current, ws_monitor)
+                                    except Exception as e:
+                                        logger.error("Advanced exits failed: %s", e)
+                        else:
+                            # No orchestrator available — use legacy exits
+                            check_all_exits(
+                                current, risk, stat_mr, kalman_pairs, micro_mom,
+                                orb_strategy, pead_strategy, ws_monitor,
+                            )
+                            # 5b. V12: Advanced exits (profit tiers, dead signal, scale-out)
+                            if _check_advanced_exits is not None:
+                                try:
+                                    adv_exits = _check_advanced_exits(risk, current)
+                                    if adv_exits:
+                                        handle_strategy_exits(adv_exits, risk, current, ws_monitor)
+                                except Exception as e:
+                                    logger.error("Advanced exits failed: %s", e)
 
                         # 6. Beta neutralization
                         run_beta_neutralization(
@@ -1538,6 +1578,15 @@ def main():
                                     last_cross_asset_update = current
                                 except Exception as e:
                                     logger.error(f"Cross-asset update failed: {e}")
+
+                        # V12 AUDIT: Recompute correlation matrix every 60 minutes (not just at open)
+                        if (current - last_correlation_refresh).total_seconds() >= 3600:  # Every 60 min
+                            try:
+                                load_correlation_cache(config.SYMBOLS)
+                                last_correlation_refresh = current
+                                logger.info("V12 AUDIT: Intraday correlation matrix refreshed")
+                            except Exception as e:
+                                logger.debug("V12 AUDIT: Correlation refresh failed: %s", e)
 
                         # V9: Watchdog health check
                         if watchdog:

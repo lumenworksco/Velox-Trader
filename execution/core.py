@@ -182,10 +182,10 @@ def _chase_unfilled_order(
 ) -> None:
     """V12 7.2: Background chase logic for unfilled limit orders.
 
-    Schedule:
-    - After 30s unfilled: amend price to current mid-quote.
-    - After 60s still unfilled: convert to market order (cancel + resubmit).
-    - After 90s still unfilled: cancel entirely.
+    V12 AUDIT: Tightened chase schedule to reduce latency:
+    - After 15s unfilled: amend price to mid-quote (using cached spread, no fresh API call).
+    - After 30s still unfilled: convert to market order (cancel + resubmit).
+    - After 45s still unfilled: cancel entirely.
 
     Runs in a daemon thread; fail-open on all errors.
     """
@@ -200,12 +200,12 @@ def _chase_unfilled_order(
     try:
         while True:
             elapsed = time.monotonic() - chase_start
-            if elapsed > 90:
-                # 90s: cancel entirely
+            if elapsed > 45:
+                # 45s: cancel entirely
                 try:
                     client.cancel_order_by_id(current_order_id)
                     logger.warning(
-                        f"V12 7.2: Chase timeout 90s — cancelled order "
+                        f"V12 7.2: Chase timeout 45s — cancelled order "
                         f"{current_order_id} for {signal.symbol}"
                     )
                 except Exception as ce:
@@ -230,8 +230,8 @@ def _chase_unfilled_order(
                 )
                 break
 
-            if elapsed > 60 and not converted:
-                # 60s: convert to market order (cancel limit + submit market)
+            if elapsed > 30 and not converted:
+                # 30s: convert to market order (cancel limit + submit market)
                 try:
                     client.cancel_order_by_id(current_order_id)
                     side = OrderSide.BUY if signal.side == "buy" else OrderSide.SELL
@@ -249,7 +249,7 @@ def _chase_unfilled_order(
                     converted = True
                     current_order_id = str(mkt_order.id)
                     logger.info(
-                        f"V12 7.2: Chase 60s — converted {signal.symbol} to market "
+                        f"V12 7.2: Chase 30s — converted {signal.symbol} to market "
                         f"order {current_order_id}"
                     )
                 except Exception as e:
@@ -259,19 +259,16 @@ def _chase_unfilled_order(
                     )
                     converted = True  # Don't retry conversion
 
-            elif elapsed > 30 and not amended and not converted:
-                # 30s: amend price to current mid-quote
+            elif elapsed > 15 and not amended and not converted:
+                # 15s: amend price to mid-quote using cached spread (no fresh API call)
                 try:
-                    from data import get_stock_data_client
-                    from alpaca.data.requests import StockLatestQuoteRequest
-                    data_client = get_stock_data_client()
-                    quote = data_client.get_stock_latest_quote(
-                        StockLatestQuoteRequest(symbol_or_symbols=signal.symbol)
-                    )
-                    if signal.symbol in quote:
-                        q = quote[signal.symbol]
-                        if q.bid_price > 0 and q.ask_price > 0:
-                            new_price = round((q.bid_price + q.ask_price) / 2, 2)
+                    from data import quote_cache  # V12 AUDIT: use cached quotes, not live fetch
+                    cached = quote_cache.get(signal.symbol)
+                    if cached is not None:
+                        bid = getattr(cached, 'bid_price', 0)
+                        ask = getattr(cached, 'ask_price', 0)
+                        if bid > 0 and ask > 0:
+                            new_price = round((bid + ask) / 2, 2)
                             client.replace_order_by_id(
                                 current_order_id,
                                 ReplaceOrderRequest(
@@ -282,9 +279,25 @@ def _chase_unfilled_order(
                             )
                             amended = True
                             logger.info(
-                                f"V12 7.2: Chase 30s — amended {signal.symbol} "
-                                f"limit to mid={new_price}"
+                                f"V12 7.2: Chase 15s — amended {signal.symbol} "
+                                f"limit to cached mid={new_price}"
                             )
+                        else:
+                            logger.debug(
+                                f"V12 7.2: Cached quote for {signal.symbol} has invalid bid/ask — skipping amend"
+                            )
+                            amended = True
+                    else:
+                        logger.debug(
+                            f"V12 7.2: No cached quote for {signal.symbol} — skipping amend"
+                        )
+                        amended = True
+                except ImportError:
+                    # quote_cache not available — fall back to no-amend
+                    logger.debug(
+                        f"V12 7.2: quote_cache not available — skipping amend for {signal.symbol}"
+                    )
+                    amended = True
                 except Exception as e:
                     logger.debug(
                         f"V12 7.2: Chase amend failed for {signal.symbol}: {e}"
@@ -327,7 +340,7 @@ def _start_chase_thread(order_id: str, signal: Signal, qty: int) -> None:
 _STALE_ORDER_THRESHOLD_SEC = 300  # 5 minutes
 
 
-def cancel_stale_orders(client=None) -> list[str]:
+def cancel_stale_orders(client=None, order_manager=None) -> list[str]:
     """V12 7.3: Cancel any orders in open status for >5 minutes.
 
     Called every scan cycle from main.py.
@@ -376,6 +389,15 @@ def cancel_stale_orders(client=None) -> list[str]:
                         f"for {order.symbol} — age={age_sec:.0f}s "
                         f"status={status}"
                     )
+                    # V12 AUDIT: Update OMS state when cancelling stale orders
+                    try:
+                        if order_manager:
+                            from oms.order import OrderState
+                            oms_order = order_manager.get_by_broker_id(str(order.id))
+                            if oms_order:
+                                order_manager.update_state(oms_order.oms_id, OrderState.CANCELLED)
+                    except Exception as e:
+                        logger.debug("V12 AUDIT: OMS state update for cancelled order failed: %s", e)
                 except Exception as ce:
                     logger.debug(
                         f"V12 7.3: Failed to cancel stale order {order.id}: {ce}"

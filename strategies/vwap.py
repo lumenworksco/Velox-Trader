@@ -45,6 +45,15 @@ class VWAPStrategy:
         market_open = datetime(today.year, today.month, today.day, 9, 30, tzinfo=config.ET)
 
         for symbol in scan_symbols:
+            # V12 AUDIT: Skip symbols with upcoming earnings (gap risk)
+            try:
+                from earnings import has_earnings_soon
+                if has_earnings_soon(symbol, days=2):
+                    logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
+                    continue
+            except Exception:
+                pass  # Fail-open
+
             # Cooldown: don't re-trigger within 5 minutes
             if symbol in self.triggered:
                 if (now - self.triggered[symbol]).total_seconds() < 300:

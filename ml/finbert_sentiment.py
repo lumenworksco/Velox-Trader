@@ -12,6 +12,7 @@ Performance: ~50ms per headline on CPU, batched for efficiency.
 
 import logging
 import time as _time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -70,6 +71,21 @@ class FinBERTSentimentScorer:
         self._total_scored = 0
         self._total_errors = 0
         self._avg_latency_ms = 0.0
+        # V12 AUDIT: Prediction log for A/B testing validation
+        self._prediction_log: deque = deque(maxlen=500)
+
+    # ------------------------------------------------------------------
+    # Prediction logging (V12 AUDIT)
+    # ------------------------------------------------------------------
+
+    def log_prediction(self, symbol: str, score: float, side: str) -> None:
+        """Log sentiment prediction for later validation."""
+        self._prediction_log.append({
+            "symbol": symbol,
+            "score": score,
+            "side": side,
+            "timestamp": _time.time(),
+        })
 
     # ------------------------------------------------------------------
     # Model loading (lazy, singleton)
@@ -248,6 +264,10 @@ class FinBERTSentimentScorer:
 
         self._cache[symbol] = (now, mult, reason)
 
+        # V12 AUDIT: Log prediction for A/B testing validation
+        side = "bullish" if avg_score > 0 else ("bearish" if avg_score < 0 else "neutral")
+        self.log_prediction(symbol, avg_score, side)
+
         logger.info(
             "V12 8.1: FinBERT %s — avg_score=%.3f mult=%.1f (%d headlines)",
             symbol, avg_score, mult, len(headlines),
@@ -264,6 +284,7 @@ class FinBERTSentimentScorer:
         return {
             "total_scored": self._total_scored,
             "total_errors": self._total_errors,
+            "prediction_log_size": len(self._prediction_log),
             "avg_latency_ms": round(self._avg_latency_ms, 1),
             "is_available": self.is_available,
             "cache_size": len(self._cache),

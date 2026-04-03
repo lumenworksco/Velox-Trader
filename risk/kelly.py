@@ -140,6 +140,19 @@ class KellyEngine:
                 logger.warning(f"Kelly computation failed for {strategy}: {e}")
                 self._fractions[strategy] = config.RISK_PER_TRADE_PCT
 
+        # V12 AUDIT: Use regime-aware Kelly when enabled
+        if getattr(config, "BAYESIAN_KELLY_ENABLED", False):
+            try:
+                regime_fractions = self.compute_regime_kelly()
+                if regime_fractions:
+                    for strategy, fraction in regime_fractions.items():
+                        self._fractions[strategy] = fraction
+                    logger.info("V12 AUDIT: Bayesian Kelly fractions applied: %s",
+                               {k: f"{v:.4f}" for k, v in regime_fractions.items()})
+                    return
+            except Exception as e:
+                logger.warning("V12 AUDIT: Bayesian Kelly failed, using standard: %s", e)
+
         self._last_computed = datetime.now(config.ET)
 
     def get_fraction(self, strategy: str) -> float:

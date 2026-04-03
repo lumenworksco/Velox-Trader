@@ -359,6 +359,9 @@ class RiskManager:
         max_position = self.current_equity * config.MAX_POSITION_PCT
         position_value = max(config.MIN_POSITION_VALUE, min(position_value, max_position))
 
+        # V12 AUDIT: Save pre-multiplier value for cascade floor
+        original_position_value = position_value
+
         # Cut size in bearish regime
         if regime == "BEARISH":
             position_value *= (1 - config.BEARISH_SIZE_CUT)
@@ -367,10 +370,9 @@ class RiskManager:
         if side == "sell":
             position_value *= config.SHORT_SIZE_MULTIPLIER
 
-        # V4: VIX-based risk scaling
+        # V12 AUDIT: Apply VIX scalar both directions (scale up in low-vol, down in high-vol)
         vix_scalar = get_vix_risk_scalar()
-        if vix_scalar < 1.0:
-            position_value *= vix_scalar
+        position_value *= vix_scalar
 
         # V12 6.3: Drawdown-based sizing — smooth multiplier reduces size as
         # drawdown deepens: at 4% DD -> 50% size, at 6.4% DD -> 20% (minimum).
@@ -385,6 +387,11 @@ class RiskManager:
                     "V12 6.3: Drawdown sizing: DD=%.2f%% mult=%.2f (size reduced %.0f%%)",
                     current_drawdown * 100, drawdown_mult, (1.0 - drawdown_mult) * 100,
                 )
+
+        # V12 AUDIT: Prevent over-hedging — minimum 30% of original size survives
+        if position_value < original_position_value * 0.30:
+            position_value = original_position_value * 0.30
+            logger.debug("V12 AUDIT: Multiplier cascade floor hit — capping reduction at 70%%")
 
         # Check we don't exceed max deployment
         deployed = sum(t.entry_price * t.qty for t in self.open_trades.values())

@@ -1,8 +1,8 @@
 """V9: Signal ranking with multi-dimensional scoring and alpha-weighted expected value.
 
-Scores each signal on regime affinity, historical win rate, R:R confidence,
-OBV divergence, seasonality, and liquidity.  Returns signals sorted best-first
-so the execution layer can prioritise when capital is constrained.
+Scores each signal on regime affinity, historical win rate, and R:R confidence.
+Returns signals sorted best-first so the execution layer can prioritise when
+capital is constrained.
 """
 
 import logging
@@ -20,12 +20,10 @@ logger = logging.getLogger(__name__)
 
 # Scoring weights (must sum to 1.0)
 _WEIGHTS = {
-    "regime":      0.30,
-    "win_rate":    0.20,
-    "confidence":  0.20,
-    "obv":         0.10,
-    "seasonality": 0.10,
-    "liquidity":   0.10,
+    "regime":      0.45,    # V12 AUDIT: Increased from 0.30 — HMM regime is most predictive
+    "win_rate":    0.25,    # V12 AUDIT: Increased from 0.20 — historical performance matters
+    "confidence":  0.30,    # V12 AUDIT: Increased from 0.20 — strategy-assigned conviction
+    # V12 AUDIT: Removed placeholder scores (obv, seasonality, liquidity) that returned 0.5
 }
 
 # Defaults used when data is unavailable
@@ -50,12 +48,9 @@ class SignalRanker:
         """Score each signal, attach score to *reason*, return sorted (best first).
 
         Scoring dimensions (each normalised to 0-1, then weighted):
-          1. Strategy-regime affinity  (30 %)
-          2. Historical win rate       (20 %)
-          3. Signal confidence / R:R   (20 %)
-          4. OBV divergence confirm    (10 %) -- placeholder, 0.5 default
-          5. Seasonality               (10 %) -- placeholder, 0.5 default
-          6. Liquidity                 (10 %) -- placeholder, 0.5 default
+          1. Strategy-regime affinity  (45 %)
+          2. Historical win rate       (25 %)
+          3. Signal confidence / R:R   (30 %)
 
         Pair signals (non-empty *pair_id*) are kept adjacent after sorting so
         both legs stay together, scored by the max of the pair.
@@ -107,9 +102,6 @@ class SignalRanker:
             "regime":      self._regime_score(signal.strategy, regime_probs),
             "win_rate":    self._win_rate_score(signal.symbol, signal.strategy, trade_history),
             "confidence":  self._confidence_score(signal),
-            "obv":         self._obv_score(),
-            "seasonality": self._seasonality_score(),
-            "liquidity":   self._liquidity_score(),
         }
         composite = sum(scores[k] * _WEIGHTS[k] for k in _WEIGHTS)
         return round(min(max(composite, 0.0), 1.0), 4)

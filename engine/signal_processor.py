@@ -814,6 +814,20 @@ def process_signals(
             database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "intra_scan_limit")
             continue
 
+        # V12 AUDIT: Enforce data quality gate on signal bars
+        try:
+            from data.quality import get_quality_framework
+            dqf = get_quality_framework()
+            bars = getattr(signal, '_bars', None)  # If bars attached to signal
+            if bars is not None and len(bars) > 0:
+                quality_score = dqf.check(bars)
+                if not quality_score.is_tradeable:
+                    logger.info("V12 AUDIT: %s data quality too low (%.2f) — rejecting signal", signal.symbol, quality_score.overall)
+                    database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "data_quality_gate")
+                    continue
+        except Exception:
+            pass  # Fail-open
+
         prev_open = set(risk.open_trades.keys())
         _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
@@ -1302,6 +1316,36 @@ def _process_single_signal(
         except Exception as e:
             logger.debug("T7-003: EDGAR check failed for %s (fail-open): %s", signal.symbol, e)
 
+    # V12 AUDIT: Gap analysis signal boost/penalty
+    gap_mult = 1.0
+    try:
+        from data.gap_analysis import get_gap_flags, GapType
+        gap_flags = get_gap_flags()
+        if signal.symbol in gap_flags:
+            gap = gap_flags[signal.symbol]
+            if gap.gap_type == GapType.MR_CANDIDATE and signal.strategy in ("STAT_MR", "VWAP"):
+                gap_mult = 1.15  # Boost MR signals on gap-fill candidates
+                logger.debug("V12 AUDIT: Gap fill boost for %s (%.1f%% gap)", signal.symbol, gap.gap_pct * 100)
+            elif gap.gap_type == GapType.BREAKOUT_CANDIDATE and signal.strategy in ("ORB", "MICRO_MOM"):
+                gap_mult = 1.10  # Boost breakout signals on large gaps
+    except Exception:
+        pass
+
+    # V12 AUDIT: Multi-timeframe confluence check (mandatory)
+    mtf_mult = 1.0
+    try:
+        from analytics.mtf_confluence import check_mtf_alignment
+        mtf_result = check_mtf_alignment(signal.symbol, signal.side)
+        if mtf_result is not None:
+            if mtf_result.alignment >= 0.66:
+                mtf_mult = 1.10  # Higher TF agrees — boost
+            elif mtf_result.alignment <= 0.33:
+                mtf_mult = 0.70  # Higher TF disagrees — penalize
+            else:
+                mtf_mult = 0.90  # Neutral — slight penalty for uncertainty
+    except Exception:
+        pass  # Fail-open
+
     # V11.3 T1: Conviction scoring — weighted average instead of multiplicative cascade.
     # The old multiplicative approach (12 factors multiplied) caused catastrophic size
     # reduction: three factors at 0.8 → 0.51 combined. Now we use weighted averaging
@@ -1317,6 +1361,8 @@ def _process_single_signal(
         (regime_mult,       0.18, "regime"),        # Market regime alignment
         (vpin_mult,         0.18, "vpin"),           # Market microstructure toxicity
         (ml_conf_mult,      0.20, "ml"),             # V11.5: ML confidence (increased from 0.15)
+        (gap_mult,          0.08, "gap"),             # V12 AUDIT: Gap analysis signal
+        (mtf_mult,          0.15, "mtf"),             # V12 AUDIT: Multi-timeframe confluence
         (breadth_mult,      0.10, "breadth"),        # V11.5: Market breadth filter
         (cross_asset_mult,  0.08, "cross_asset"),    # Cross-asset signal
         (llm_mult,          0.08, "llm"),            # LLM scoring

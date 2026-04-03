@@ -7,9 +7,9 @@ runaway strategies or adverse market microstructure before the daily
 circuit breaker triggers.
 
 Rolling windows (RISK-006: each window pauses trading for its own duration):
-    - 5 min:  max -0.3% portfolio loss  -> pause for 5 min
-    - 30 min: max -0.5% portfolio loss  -> pause for 30 min
-    - 1 hour: max -0.8% portfolio loss  -> pause for 1 hour
+    - 5 min:  max -0.8% portfolio loss  -> pause for 5 min
+    - 30 min: max -1.2% portfolio loss  -> pause for 30 min
+    - 1 hour: max -1.8% portfolio loss  -> pause for 1 hour
 
 Velocity controls:
     - 3+ stops hit in 15 min  -> pause all entries for 30 min
@@ -61,9 +61,9 @@ class PnLTick:
 
 # Rolling window limits
 WINDOW_LIMITS = {
-    timedelta(minutes=5): -0.003,    # -0.3%
-    timedelta(minutes=30): -0.005,   # -0.5%
-    timedelta(hours=1): -0.008,      # -0.8%
+    timedelta(minutes=5): -0.008,    # V12 AUDIT: Widened from -0.3% to -0.8%
+    timedelta(minutes=30): -0.012,   # V12 AUDIT: Widened from -0.5% to -1.2%
+    timedelta(hours=1): -0.018,      # V12 AUDIT: Widened from -0.8% to -1.8%
 }
 
 # Velocity thresholds

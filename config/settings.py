@@ -64,8 +64,9 @@ SECTOR_ETFS = [
 
 HIGH_MOMENTUM_MIDCAPS = [
     "CELH", "SMCI", "AXON", "PODD", "ENPH", "FSLR", "RUN", "BLNK",
-    "CHPT", "BE", "IONQ", "RGTI", "QUBT", "ARQQ", "BBAI", "SOUN",
-    "ASTS", "RDW", "RKLB", "LUNR", "DUOL", "CAVA", "BROS", "SHAK",
+    "CHPT", "BE",
+    # V12 AUDIT: Removed illiquid micro-caps: QUBT, IONQ, RGTI, SOUN, ARQQ, BBAI, RKLB, LUNR
+    "ASTS", "RDW", "DUOL", "CAVA", "BROS", "SHAK",
     "WING", "TXRH", "CMG", "DPZ", "DNUT", "JACK",
 ]
 
@@ -91,8 +92,8 @@ SECTOR_MAP = {
     "PANW": "XLK", "ZS": "XLK", "SNOW": "XLK", "DDOG": "XLK", "NET": "XLK",
     "FTNT": "XLK", "OKTA": "XLK", "TWLO": "XLK", "MDB": "XLK", "ESTC": "XLK",
     "CFLT": "XLK", "GTLB": "XLK", "BILL": "XLK", "HUBS": "XLK", "VEEV": "XLK",
-    "WDAY": "XLK", "ANSS": "XLK", "SMCI": "XLK", "IONQ": "XLK", "RGTI": "XLK",
-    "QUBT": "XLK", "ARQQ": "XLK", "BBAI": "XLK", "SOUN": "XLK", "APP": "XLK",
+    "WDAY": "XLK", "ANSS": "XLK", "SMCI": "XLK", "APP": "XLK",
+    # V12 AUDIT: Removed IONQ, RGTI, QUBT, ARQQ, BBAI, SOUN (illiquid micro-caps)
     # Semiconductors
     "SOXX": "SMH", "SMH": "SMH", "SOXL": "SMH",
     # Communication Services
@@ -118,7 +119,8 @@ SECTOR_MAP = {
     # Biotech
     "IBB": "IBB", "LABU": "IBB", "LABD": "IBB",
     # Aerospace / Space
-    "AXON": "XLI", "ASTS": "XLI", "RDW": "XLI", "RKLB": "XLI", "LUNR": "XLI",
+    "AXON": "XLI", "ASTS": "XLI", "RDW": "XLI",
+    # V12 AUDIT: Removed RKLB, LUNR (illiquid micro-caps)
     # Consumer / Other
     "CELH": "XLP",
 }
@@ -140,14 +142,12 @@ SECTOR_GROUPS = {
 # ============================================================
 
 STRATEGY_ALLOCATIONS = {
-    # V11.3 T10: Reallocated from dead strategies (COPULA_PAIRS, SECTOR_MOM, etc.)
-    # to active ones. Total = 100%.
-    'STAT_MR': 0.35,         # was 0.30 — highest Sharpe, most active
-    'VWAP': 0.20,            # was 0.15 — second most active
-    'KALMAN_PAIRS': 0.20,    # was 0.15 — diversifying, uncorrelated
-    'ORB': 0.10,             # was 0.05 — now with trailing stops
-    'MICRO_MOM': 0.10,       # was 0.05 — now with ATR-based stops
-    'PEAD': 0.05,            # was 0.08 — event-driven, low frequency
+    'STAT_MR': 0.25,         # V12 AUDIT: Reduced from 0.35 — crowded edge, high alpha decay
+    'VWAP': 0.13,            # V12 AUDIT: Reduced from 0.20 — overlaps with STAT_MR
+    'KALMAN_PAIRS': 0.27,    # V12 AUDIT: Increased from 0.20 — uncorrelated, diversifying
+    'ORB': 0.12,             # V12 AUDIT: Increased from 0.10 — good risk mgmt
+    'MICRO_MOM': 0.05,       # V12 AUDIT: Reduced from 0.10 — weak signals, high alpha decay
+    'PEAD': 0.18,            # V12 AUDIT: Increased from 0.05 — orthogonal, proven academic edge
 }
 
 # --- Statistical Mean Reversion ---
@@ -234,8 +234,8 @@ MICRO_BETA_TABLE = {
 PEAD_ENABLED = True
 PEAD_MIN_SURPRISE_PCT = 3.0        # Lowered from 5.0 — capture more earnings plays
 PEAD_MIN_VOLUME_RATIO = 2.0       # Tightened from 1.5 — require strong volume confirmation
-PEAD_HOLD_DAYS_MIN = 10
-PEAD_HOLD_DAYS_MAX = 5             # Shortened from 20 — most drift happens in first 5 days
+PEAD_HOLD_DAYS_MIN = 3             # Minimum hold = 3 days (capture initial drift)
+PEAD_HOLD_DAYS_MAX = 10            # Maximum hold = 10 days (most drift captured by then)
 PEAD_TAKE_PROFIT = 0.05
 PEAD_STOP_LOSS = 0.02              # Tightened from 3% to 2% — cut losses faster
 PEAD_MAX_POSITIONS = 5
@@ -288,6 +288,9 @@ WIN_STREAK_SIZING_ENABLED = os.getenv("WIN_STREAK_SIZING_ENABLED", "true") == "t
 CONVICTION_PYRAMIDING_ENABLED = os.getenv("CONVICTION_PYRAMIDING_ENABLED", "false") == "true"
 DYNAMIC_STOP_TIGHTENING_ENABLED = os.getenv("DYNAMIC_STOP_TIGHTENING_ENABLED", "true") == "true"
 
+# --- V12 AUDIT: ML Core Feature Selection ---
+ML_CORE_FEATURES_ONLY = True  # Reduce ML features from 200+ to ~50 high-signal features
+
 # ============================================================
 # RISK MANAGEMENT
 # ============================================================
@@ -303,12 +306,15 @@ PDT_ENFORCEMENT_ENABLED = os.getenv("PDT_ENFORCEMENT", "true") == "true"
 PDT_EQUITY_THRESHOLD = 25_000.0
 
 # --- Position Sizing ---
-RISK_PER_TRADE_PCT = 0.005          # Risk 0.5% of portfolio per trade (was 0.8% — tighter)
-MAX_POSITION_PCT = 0.05             # Hard cap: max 5% per position (was 8% — tighter)
+RISK_PER_TRADE_PCT = 0.008         # V12 AUDIT: Increased from 0.005 — 0.8% risk per trade
+MAX_POSITION_PCT = 0.08            # V12 AUDIT: Increased from 0.05 — 8% max per position
 MIN_POSITION_VALUE = 100            # Min $100 per trade
 MAX_POSITIONS = 12
 MAX_PORTFOLIO_DEPLOY = 0.55
 DAILY_LOSS_HALT = -0.025
+
+# V12 AUDIT: Position sizing multiplier cascade floor
+POSITION_SIZE_MULTIPLIER_FLOOR = 0.30  # Never reduce position by more than 70%
 
 # --- Volatility Targeting ---
 VOL_TARGET_DAILY = 0.01
