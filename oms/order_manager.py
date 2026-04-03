@@ -1,6 +1,9 @@
 """V10 OMS — Central order registry and lifecycle manager."""
 
+import hashlib
+import json
 import logging
+import os
 import threading
 from collections import deque
 from datetime import datetime
@@ -8,6 +11,12 @@ from datetime import datetime
 from oms.order import Order, OrderState
 
 logger = logging.getLogger(__name__)
+
+# V12 11.2: Persistent idempotency key file — survives restarts
+_IDEMPOTENCY_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "models", "idempotency_keys.json"
+)
+_IDEMPOTENCY_PERSIST_LIMIT = 100  # Keep last N keys on disk
 
 
 class OrderManager:
@@ -29,24 +38,58 @@ class OrderManager:
             self._idempotency: dict[str, str] = {}    # idempotency_key -> oms_id
             self._lock = threading.Lock()
             self._audit: deque[dict] = deque(maxlen=10_000)  # HIGH-006: bounded audit log
+            # V12 11.2: Load persisted idempotency keys from previous session
+            self._load_idempotency_keys()
             logger.info("OrderManager initialized successfully")
         except Exception as e:
             logger.critical("OrderManager initialization failed: %s", e, exc_info=True)
             raise
 
+    # ------------------------------------------------------------------
+    # V12 11.2: Idempotency key persistence across restarts
+    # ------------------------------------------------------------------
+
+    def _load_idempotency_keys(self) -> None:
+        """Load persisted idempotency keys from disk on startup."""
+        try:
+            if os.path.exists(_IDEMPOTENCY_FILE):
+                with open(_IDEMPOTENCY_FILE, "r") as f:
+                    data = json.load(f)
+                keys = data if isinstance(data, dict) else {}
+                self._idempotency.update(keys)
+                logger.info(f"V12 11.2: Loaded {len(keys)} idempotency keys from disk")
+        except Exception as e:
+            logger.warning(f"V12 11.2: Failed to load idempotency keys: {e}")
+
+    def _persist_idempotency_keys(self) -> None:
+        """Persist the most recent idempotency keys to disk (last N entries)."""
+        try:
+            # Keep only the last N keys to bound file size
+            items = list(self._idempotency.items())
+            trimmed = dict(items[-_IDEMPOTENCY_PERSIST_LIMIT:])
+            os.makedirs(os.path.dirname(_IDEMPOTENCY_FILE), exist_ok=True)
+            with open(_IDEMPOTENCY_FILE, "w") as f:
+                json.dump(trimmed, f)
+        except Exception as e:
+            logger.warning(f"V12 11.2: Failed to persist idempotency keys: {e}")
+
     @staticmethod
     def _generate_idempotency_key(symbol: str, side: str, qty: int,
                                    strategy: str) -> str:
-        """BUG-012: Auto-generate idempotency key from order parameters.
+        """BUG-012 / V12 11.2: Auto-generate idempotency key from order parameters.
 
-        Uses a 5-second timestamp bucket so that identical orders within the
-        same 5-second window are treated as duplicates.
+        Uses a hash of (symbol, side, qty, strategy) combined with a 5-second
+        timestamp bucket so that identical orders within the same window are
+        treated as duplicates. The hash is deterministic across restarts.
 
         HIGH-024: Uses time.monotonic() to avoid issues with system clock changes.
         """
         import time
         timestamp_bucket = int(time.monotonic()) // 5
-        return f"{symbol}_{side}_{qty}_{strategy}_{timestamp_bucket}"
+        # V12 11.2: Include a stable hash of order parameters
+        raw = f"{symbol}|{side}|{qty}|{strategy}"
+        param_hash = hashlib.sha256(raw.encode()).hexdigest()[:12]
+        return f"{param_hash}_{timestamp_bucket}"
 
     def create_order(self, symbol: str, strategy: str, side: str,
                      order_type: str, qty: int, limit_price: float = 0.0,
@@ -83,6 +126,9 @@ class OrderManager:
             self._orders[order.oms_id] = order
             self._by_symbol.setdefault(symbol, []).append(order.oms_id)
             self._idempotency[idempotency_key] = order.oms_id
+
+            # V12 11.2: Persist idempotency keys to disk after each new order
+            self._persist_idempotency_keys()
 
             self._log_transition(order, None, OrderState.PENDING)
             logger.info(f"OMS: Created order {order.oms_id} {side} {qty} {symbol} ({strategy})")

@@ -262,8 +262,8 @@ class Container:
             .MarginMonitor()
         ))
         self.register_factory("corporate_actions", lambda: (
-            __import__("risk.corporate_actions", fromlist=["CorporateActionsMonitor"])
-            .CorporateActionsMonitor()
+            __import__("risk.corporate_actions", fromlist=["CorporateActionDetector"])
+            .CorporateActionDetector()
         ))
         self.register_factory("conformal_stops", lambda: (
             __import__("risk.conformal_stops", fromlist=["ConformalStopEngine"])
@@ -408,7 +408,7 @@ class Container:
 
     @property
     def corporate_actions(self):
-        """CorporateActionsMonitor instance."""
+        """CorporateActionDetector instance."""
         return self.get("corporate_actions")
 
     @property

@@ -173,7 +173,7 @@ def _get_conn() -> sqlite3.Connection:
 # =============================================================================
 
 # Current schema version — bump this when adding a new migration
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 def _ensure_schema_version_table(conn: sqlite3.Connection):
@@ -321,6 +321,20 @@ def _migrate_6(conn: sqlite3.Connection):
     logger.info("T2-006: Added overnight and partial-exit performance indexes")
 
 
+def _migrate_7(conn: sqlite3.Connection):
+    """Migration 7: V12 6.1 — Add commission column to trades table.
+
+    Tracks per-trade commission for accurate net P&L and Sharpe calculation.
+    Defaults to 0.0 (Alpaca is commission-free for stocks, but this supports
+    futures/options where commissions apply).
+    """
+    cursor = conn.execute("PRAGMA table_info(trades)")
+    existing_cols = {row["name"] for row in cursor.fetchall()}
+    if "commission" not in existing_cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN commission REAL DEFAULT 0.0")
+        logger.info("V12 6.1: Added commission column to trades table")
+
+
 # Registry of all migrations: version -> (function, description)
 _MIGRATIONS: dict[int, tuple] = {
     1: (_migrate_1, "Baseline schema versioning"),
@@ -329,6 +343,7 @@ _MIGRATIONS: dict[int, tuple] = {
     4: (_migrate_4, "T4-005: Add hot query indexes for market-hours performance"),
     5: (_migrate_5, "T2-006: Create audit_log table for V11.2 compliance"),
     6: (_migrate_6, "T2-006: Add overnight and partial-exit performance indexes"),
+    7: (_migrate_7, "V12 6.1: Add commission column to trades table"),
 }
 
 
@@ -407,7 +422,8 @@ def init_db():
             exit_time TEXT,
             exit_reason TEXT,
             pnl REAL,
-            pnl_pct REAL
+            pnl_pct REAL,
+            commission REAL DEFAULT 0.0
         );
 
         CREATE TABLE IF NOT EXISTS signals (
@@ -700,15 +716,20 @@ def init_db():
 
 def log_trade(symbol: str, strategy: str, side: str, entry_price: float,
               exit_price: float, qty: float, entry_time: datetime,
-              exit_time: datetime, exit_reason: str, pnl: float, pnl_pct: float):
-    """Log a completed trade."""
+              exit_time: datetime, exit_reason: str, pnl: float, pnl_pct: float,
+              commission: float = 0.0):
+    """Log a completed trade.
+
+    V12 6.1: commission field records total commission paid on this trade.
+    """
     conn = _get_conn()
     conn.execute(
         """INSERT INTO trades (symbol, strategy, side, entry_price, exit_price,
-           qty, entry_time, exit_time, exit_reason, pnl, pnl_pct)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           qty, entry_time, exit_time, exit_reason, pnl, pnl_pct, commission)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (symbol, strategy, side, entry_price, exit_price, qty,
-         _to_iso(entry_time), _to_iso(exit_time), exit_reason, pnl, pnl_pct),
+         _to_iso(entry_time), _to_iso(exit_time), exit_reason, pnl, pnl_pct,
+         commission),
     )
     conn.commit()
 

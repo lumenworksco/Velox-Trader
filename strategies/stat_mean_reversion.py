@@ -188,6 +188,16 @@ class StatMeanReversion:
                 if price_sigma < 1e-8:
                     price_sigma = sigma
 
+                # V12 2.4: OU sigma zero guard — if both price_sigma and OU sigma
+                # are near-zero (all prices identical in low-vol period), z-score
+                # and stop/target math produce NaN or infinite values. Skip signal.
+                if price_sigma < 1e-10:
+                    logger.debug(f"MR skip {symbol}: price_sigma ~0 (low-vol period)")
+                    continue
+                if sigma < 1e-10:
+                    logger.debug(f"MR skip {symbol}: OU sigma ~0 (low-vol period)")
+                    continue
+
                 # RSI(7) computation
                 rsi = self._compute_rsi(close, period=config.MR_RSI_PERIOD)
                 if rsi is None:
@@ -316,6 +326,11 @@ class StatMeanReversion:
                     continue
 
                 price = bars["close"].iloc[-1]
+
+                # V12 2.4: OU sigma zero guard — skip exit check if sigma ~0
+                if ou['sigma'] < 1e-10:
+                    logger.debug(f"MR exit skip {symbol}: OU sigma ~0")
+                    continue
 
                 # Compute current z-score
                 zscore = compute_zscore(price, ou['mu'], ou['sigma'])

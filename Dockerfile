@@ -35,6 +35,10 @@ USER botuser
 
 EXPOSE 8080
 
+# V12 15.1: Ensure Docker sends SIGINT (not SIGTERM) so Python KeyboardInterrupt
+# and our signal handler in main.py trigger a clean graceful shutdown.
+STOPSIGNAL SIGINT
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 

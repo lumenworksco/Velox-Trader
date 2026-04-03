@@ -21,6 +21,7 @@ V11.3 Upgrades:
 """
 
 import argparse
+import collections
 import logging
 import signal
 import sys
@@ -38,6 +39,7 @@ from data import (
     verify_connectivity, verify_data_feed, get_account, get_clock,
     get_positions, get_snapshot, get_snapshots,
     get_filled_exit_price, get_filled_exit_info,
+    get_feed_monitor,
 )
 # V10: Decomposed engine modules
 from engine.broker_sync import sync_positions_with_broker, check_shadow_exits
@@ -51,7 +53,18 @@ try:
 except ImportError:
     _check_advanced_exits = None
 from engine.scanner import scan_all_strategies, check_all_exits, run_beta_neutralization
-from engine.daily_tasks import daily_reset, weekly_tasks, eod_close
+from engine.daily_tasks import daily_reset, weekly_tasks, eod_close, backup_database
+# V12 BONUS: Profit maximization engine
+try:
+    from engine.profit_maximizer import (
+        IntradayVolRegime, WinStreakTracker,
+        compute_dynamic_stop, get_adaptive_scan_interval,
+    )
+except ImportError:
+    IntradayVolRegime = None
+    WinStreakTracker = None
+    compute_dynamic_stop = None
+    get_adaptive_scan_interval = None
 from strategies.base import Signal
 from strategies.regime import MarketRegime
 from strategies.stat_mean_reversion import StatMeanReversion
@@ -295,6 +308,11 @@ try:
     from compliance.surveillance import SelfSurveillance
 except ImportError:
     SelfSurveillance = None
+
+try:
+    from risk.corporate_actions import CorporateActionDetector
+except ImportError:
+    CorporateActionDetector = None
 
 try:
     from ops.drawdown_risk import DrawdownRiskManager
@@ -561,6 +579,38 @@ def main():
         if config.MAX_POSITIONS < 1:
             issues.append(f"MAX_POSITIONS={config.MAX_POSITIONS} — no trades possible")
 
+        # V12 11.4: Startup Self-Test — run synthetic signal through pipeline
+        try:
+            from strategies.base import Signal
+            test_signal = Signal(
+                symbol="AAPL",
+                side="buy",
+                strategy="STAT_MR",
+                entry_price=150.0,
+                take_profit=153.0,
+                stop_loss=148.0,
+                confidence=0.7,
+            )
+            # Test risk manager sizing (dry-run)
+            from risk.risk_manager import RiskManager
+            test_risk = RiskManager(equity=100_000.0, cash=100_000.0)
+            test_qty = test_risk.calculate_position_size(
+                entry_price=test_signal.entry_price,
+                stop_price=test_signal.stop_loss,
+                regime="MEAN_REVERTING",
+                strategy="STAT_MR",
+            )
+            if test_qty > 0:
+                logger.info(
+                    "V12 11.4: Self-test PASSED — synthetic AAPL STAT_MR signal "
+                    "sized to %d shares", test_qty,
+                )
+            else:
+                issues.append("Self-test: RiskManager returned qty=0 for synthetic signal")
+        except Exception as e:
+            issues.append(f"Self-test pipeline failed: {e}")
+            logger.warning("V12 11.4: Self-test failed (non-fatal): %s", e)
+
         if issues:
             for issue in issues:
                 logger.warning(f"V12 PREFLIGHT WARNING: {issue}")
@@ -726,17 +776,22 @@ def main():
     # Startup checks
     info = startup_checks()
 
-    # WIRE-013: Disaster recovery state validation at boot (fail-open)
+    # V12 14.1: Disaster recovery — check if recovery needed + full state reconciliation
+    _dr_instance = None
     try:
         if DisasterRecovery is not None:
-            _dr = DisasterRecovery()
-            _dr_status = _dr.get_status()
+            _dr_instance = DisasterRecovery(data_dir=str(Path(__file__).resolve().parent))
+            _dr_status = _dr_instance.get_status()
             if _dr_status:
-                logger.info("WIRE-013: Disaster recovery status: %s", _dr_status)
-            _dr.check_heartbeat()
-            _dr.update_heartbeat()
+                logger.info("V12 14.1: Disaster recovery status: %s", _dr_status)
+            # Check heartbeat staleness — if stale, a crash likely occurred
+            heartbeat_ok = _dr_instance.check_heartbeat()
+            if not heartbeat_ok:
+                logger.warning("V12 14.1: Stale heartbeat detected — previous session may have crashed")
+                console.print("[yellow]V12 14.1: Stale heartbeat — running state recovery...[/yellow]")
+            _dr_instance.update_heartbeat()
     except Exception as e:
-        logger.info("WIRE-013: Disaster recovery check skipped (fail-open): %s", e)
+        logger.info("V12 14.1: Disaster recovery boot check skipped (fail-open): %s", e)
 
     # V10: Consolidated initialization via engine/startup.py
     from engine.startup import (
@@ -782,6 +837,78 @@ def main():
 
     risk = initialize_risk_manager(info["equity"], info["cash"])
 
+    # V12 6.5: Recover positions from broker on startup (mid-day restart safety)
+    try:
+        from data import get_trading_client as _get_tc
+        _tc = _get_tc()
+        _broker_positions = _tc.get_all_positions()
+        _db_symbols = set(risk.open_trades.keys())
+        _broker_symbols = {p.symbol for p in _broker_positions}
+        _adopted = 0
+        _orphaned = 0
+
+        # Adopt broker positions not in DB
+        for bp in _broker_positions:
+            if bp.symbol not in _db_symbols:
+                try:
+                    from risk.risk_manager import TradeRecord
+                    _side = "buy" if float(bp.qty) > 0 else "sell"
+                    _trade = TradeRecord(
+                        symbol=bp.symbol,
+                        strategy="UNKNOWN_ADOPTED",
+                        side=_side,
+                        entry_price=float(bp.avg_entry_price),
+                        entry_time=now_et(),
+                        qty=abs(int(float(bp.qty))),
+                        take_profit=0.0,
+                        stop_loss=0.0,
+                        pnl=float(bp.unrealized_pl),
+                        status="open",
+                        order_id="adopted",
+                        hold_type="day",
+                    )
+                    risk.register_trade(_trade)
+                    _adopted += 1
+                    logger.warning(
+                        "V12 6.5: ADOPTED broker position %s (%s %s @ $%.2f) — "
+                        "not in DB, likely from pre-crash state",
+                        bp.symbol, _side, bp.qty, float(bp.avg_entry_price),
+                    )
+                except Exception as _ae:
+                    logger.error("V12 6.5: Failed to adopt %s: %s", bp.symbol, _ae)
+
+        # Flag DB positions not at broker (orphans)
+        for sym in _db_symbols:
+            if sym not in _broker_symbols:
+                _orphaned += 1
+                logger.warning(
+                    "V12 6.5: ORPHAN position %s — in DB but not at broker. "
+                    "Marking as closed.",
+                    sym,
+                )
+                try:
+                    risk.close_trade(sym, 0.0, now_et(), exit_reason="orphan_recovery")
+                except Exception:
+                    pass
+
+        if _adopted or _orphaned:
+            logger.warning(
+                "V12 6.5: Position recovery complete — %d adopted, %d orphaned",
+                _adopted, _orphaned,
+            )
+            if notifications and config.TELEGRAM_ENABLED:
+                try:
+                    notifications.send_alert(
+                        f"Position Recovery: {_adopted} adopted, {_orphaned} orphaned",
+                        severity="WARNING",
+                    )
+                except Exception:
+                    pass
+        else:
+            logger.info("V12 6.5: Position recovery — all positions in sync")
+    except Exception as _e:
+        logger.warning("V12 6.5: Position recovery failed (non-fatal): %s", _e)
+
     v10 = initialize_v10_components()
     order_manager = v10["order_manager"]
     tiered_cb = v10["tiered_cb"]
@@ -789,8 +916,20 @@ def main():
     var_monitor = v10["var_monitor"]
     corr_limiter = v10["corr_limiter"]
 
+    # V12 2.9: Track VIX values over a rolling 15-minute window for spike detection.
+    # Each entry is (timestamp_epoch, vix_value).  Checked every scan cycle.
+    _vix_history: collections.deque = collections.deque()
+    VIX_SPIKE_WINDOW_SEC = 15 * 60          # 15 minutes
+    VIX_SPIKE_THRESHOLD_PCT = 0.20          # 20 % rise triggers escalation
+
     ws_monitor = initialize_websocket(risk)
     initialize_dashboard(order_manager, kill_switch, tiered_cb)
+
+    # V12 BONUS: Initialize profit maximization components
+    _intraday_vol_regime = IntradayVolRegime() if IntradayVolRegime else None
+    _win_streak_tracker = WinStreakTracker() if WinStreakTracker else None
+    if _intraday_vol_regime:
+        logger.info("V12 BONUS: IntradayVolRegime + WinStreakTracker initialized")
 
     # V11.3 T2: Initialize intraday risk controls (velocity + rolling P&L limits)
     intraday_controls = None
@@ -815,6 +954,10 @@ def main():
         except Exception as e:
             logger.warning(f"V11.4: Black-Litterman init failed (non-fatal): {e}")
 
+    # V12 Item 2.3: Initialize data feed monitor for outage detection
+    feed_monitor = get_feed_monitor()
+    logger.info("V12-2.3: DataFeedMonitor initialized")
+
     # Load filters
     try:
         load_earnings_cache(config.SYMBOLS)
@@ -831,8 +974,30 @@ def main():
     eod_summary_printed = False
     current_analytics = None
     universe_prepared_today = False
+    universe_refreshed_today = False  # V12-5.4: track 8:30 AM universe refresh
     last_sunday_task = None
     latest_consistency_score = 0.0
+    last_corp_action_check = now_et()
+    reconciled_at_open_today = False
+    reconciled_at_close_today = False
+
+    # --- V12 2.5: Corporate action detector (fail-open) ---
+    corp_action_detector = None
+    if CorporateActionDetector:
+        try:
+            corp_action_detector = CorporateActionDetector()
+            logger.info("V12 2.5: CorporateActionDetector initialized")
+        except Exception as e:
+            logger.warning(f"V12 2.5: CorporateActionDetector init failed (fail-open): {e}")
+
+    # --- V12 3.1: Enhanced reconciler from Container (fail-open) ---
+    v11_reconciler = None
+    if V11Reconciler:
+        try:
+            v11_reconciler = _ctr.get("v11_reconciler")
+            logger.info("V12 3.1: V11 PositionReconciler initialized")
+        except Exception as e:
+            logger.warning(f"V12 3.1: V11 PositionReconciler init failed (fail-open): {e}")
 
     # Feature flags
     features = ["MR40%", "VWAP20%", "PAIRS20%", "PEAD10%", "ORB5%", "MICRO5%"]
@@ -1036,9 +1201,27 @@ def main():
                     # V11.3 T2: Reset intraday controls for new day
                     if intraday_controls:
                         intraday_controls.reset_daily()
+                    # V12 2.9: Clear VIX spike history at day boundary
+                    _vix_history.clear()
                     universe_prepared_today = False
+                    reconciled_at_open_today = False
+                    reconciled_at_close_today = False
+                    universe_refreshed_today = False  # V12-5.4: reset for new day
                     last_day = current.date()
                     eod_summary_printed = False
+
+                # -------------------------------------------------------
+                # V12-5.4: Universe refresh at 8:30 AM ET
+                # -------------------------------------------------------
+                if not universe_refreshed_today and current_time >= time(8, 30):
+                    universe_refreshed_today = True
+                    try:
+                        from data.universe import get_dynamic_universe
+                        _universe = get_dynamic_universe()
+                        count = _universe.refresh_daily()
+                        logger.info("V12-5.4: Universe refreshed at 8:30 AM — %d symbols", count)
+                    except Exception as e:
+                        logger.error("V12-5.4: Universe refresh failed: %s", e)
 
                 # -------------------------------------------------------
                 # Sunday tasks — weekly pair selection, optimization, validation
@@ -1122,6 +1305,28 @@ def main():
                         except Exception as e:
                             logger.error(f"ORB opening range recording failed: {e}")
 
+                    # V12 3.1: Reconciliation at market open (once per day)
+                    if not reconciled_at_open_today:
+                        reconciled_at_open_today = True
+                        if v11_reconciler:
+                            try:
+                                report = v11_reconciler.reconcile()
+                                if report.has_issues:
+                                    logger.warning(
+                                        f"V12 3.1: Open reconciliation found {len(report.discrepancies)} "
+                                        f"discrepancies ({report.auto_healed_count} auto-healed)"
+                                    )
+                                else:
+                                    logger.info("V12 3.1: Open reconciliation — all positions reconciled")
+                            except Exception as e:
+                                logger.error(f"V12 3.1: Open reconciliation failed (fail-open): {e}")
+                        if reconciler:
+                            try:
+                                reconciler.reconcile()
+                                last_reconciliation = current
+                            except Exception as e:
+                                logger.error(f"V12 3.1: V9 open reconciliation failed: {e}")
+
                     # Trading hours scan
                     if is_trading_hours(current_time):
                         # 1. Update PnL lock state
@@ -1132,8 +1337,78 @@ def main():
                         if tiered_cb:
                             day_pnl_pct = risk.day_pnl / max(risk.current_equity, 1)
                             tier = tiered_cb.update(day_pnl_pct, current)
+
+                            # V12 2.9: VIX spike circuit breaker — escalate to
+                            # ORANGE if VIX rises >20 % within 15 minutes, even
+                            # when realized P&L hasn't triggered a tier yet.
+                            try:
+                                from risk import get_vix_level as _get_vix
+                                from risk.circuit_breaker import CircuitTier
+                                _cur_vix = _get_vix()
+                                _now_ts = time_mod.time()
+                                if _cur_vix > 0:
+                                    _vix_history.append((_now_ts, _cur_vix))
+                                    # Purge entries older than the 15-min window
+                                    _cutoff = _now_ts - VIX_SPIKE_WINDOW_SEC
+                                    while _vix_history and _vix_history[0][0] < _cutoff:
+                                        _vix_history.popleft()
+                                    # Check for spike: compare oldest value in window to current
+                                    if len(_vix_history) >= 2:
+                                        _oldest_vix = _vix_history[0][1]
+                                        if _oldest_vix > 0:
+                                            _vix_change_pct = (_cur_vix - _oldest_vix) / _oldest_vix
+                                            if _vix_change_pct >= VIX_SPIKE_THRESHOLD_PCT:
+                                                tiered_cb.escalate_to(
+                                                    CircuitTier.ORANGE,
+                                                    reason=f"VIX spike {_vix_change_pct:.1%} in 15min "
+                                                           f"({_oldest_vix:.1f} -> {_cur_vix:.1f})",
+                                                )
+                                                tier = tiered_cb.current_tier
+                                                logger.warning(
+                                                    "V12 2.9: VIX spike detected — %.1f -> %.1f "
+                                                    "(+%.1f%%) in 15min — circuit breaker escalated to %s",
+                                                    _oldest_vix, _cur_vix,
+                                                    _vix_change_pct * 100, tier.name,
+                                                )
+                            except Exception as _vix_err:
+                                logger.debug("V12 2.9: VIX spike check failed (non-fatal): %s", _vix_err)
+
                             if tiered_cb.should_close_all and kill_switch:
-                                kill_switch.activate("tiered_cb_black", risk_manager=risk, order_manager=order_manager)
+                                try:
+                                    kill_switch.activate("tiered_cb_black", risk_manager=risk, order_manager=order_manager)
+                                except Exception as ks_err:
+                                    # V12 2.8: Kill switch failed — fall back to direct
+                                    # synchronous market-order close of all positions via
+                                    # the broker API so we never hold unmanaged positions.
+                                    logger.critical(
+                                        "Kill switch activation FAILED (%s) — "
+                                        "falling back to direct position closure",
+                                        ks_err, exc_info=True,
+                                    )
+                                    try:
+                                        from execution import close_position as _emergency_close
+                                        for _sym in list(risk.open_trades.keys()):
+                                            try:
+                                                _emergency_close(_sym, reason="kill_switch_fallback")
+                                                _t = risk.open_trades.get(_sym)
+                                                if _t:
+                                                    risk.close_trade(
+                                                        _sym, _t.entry_price, current,
+                                                        exit_reason="kill_switch_fallback",
+                                                    )
+                                                logger.info("Kill switch fallback: closed %s", _sym)
+                                            except Exception as close_err:
+                                                logger.critical(
+                                                    "Kill switch fallback: FAILED to close %s: %s "
+                                                    "— MANUAL INTERVENTION REQUIRED",
+                                                    _sym, close_err,
+                                                )
+                                    except Exception as import_err:
+                                        logger.critical(
+                                            "Kill switch fallback: cannot import execution module: %s "
+                                            "— MANUAL INTERVENTION REQUIRED",
+                                            import_err,
+                                        )
                                 skip_scan = True
                             elif tiered_cb.should_close_day_trades:
                                 # Red tier: close day-hold positions
@@ -1164,12 +1439,60 @@ def main():
                             last_scan = current
                             continue
 
+                        # V12-2.3: Data feed health check — probe snapshot API
+                        # for open positions (or core symbols) to detect outages.
+                        try:
+                            _probe_symbols = list(risk.open_trades.keys()) or config.CORE_SYMBOLS[:5]
+                            _probe_succeeded = []
+                            _probe_failed = []
+                            _probe_prices: dict[str, float] = {}
+                            try:
+                                _probe_snaps = get_snapshots(_probe_symbols)
+                                for _ps in _probe_symbols:
+                                    _snap = _probe_snaps.get(_ps)
+                                    if _snap and _snap.latest_trade:
+                                        _probe_succeeded.append(_ps)
+                                        _probe_prices[_ps] = float(_snap.latest_trade.price)
+                                    else:
+                                        _probe_failed.append(_ps)
+                            except Exception as _probe_err:
+                                logger.warning("V12-2.3: Feed probe failed entirely: %s", _probe_err)
+                                _probe_failed = _probe_symbols
+                            feed_monitor.report_cycle(
+                                succeeded=_probe_succeeded,
+                                failed=_probe_failed,
+                                prices=_probe_prices,
+                            )
+                        except Exception as _fm_err:
+                            logger.debug("V12-2.3: Feed monitor update failed (non-fatal): %s", _fm_err)
+
                         # 2-3. Scan all strategies + detect events
-                        signals = scan_all_strategies(
-                            current, regime, stat_mr, kalman_pairs, micro_mom,
-                            vwap_strategy, orb_strategy, pead_strategy, signal_ranker,
-                            day_pnl_pct=day_pnl_pct,
-                        )
+                        # V12-2.3: Block new signal generation when feed is down
+                        if feed_monitor.is_feed_down:
+                            signals = []
+                            logger.warning(
+                                "V12-2.3: Feed DOWN (cycle %d) — skipping signal scan, "
+                                "exit checks use cached prices",
+                                feed_monitor.consecutive_down_cycles,
+                            )
+                        else:
+                            signals = scan_all_strategies(
+                                current, regime, stat_mr, kalman_pairs, micro_mom,
+                                vwap_strategy, orb_strategy, pead_strategy, signal_ranker,
+                                day_pnl_pct=day_pnl_pct,
+                            )
+
+                        # V12-2.3: Apply stale-param confidence reduction after recovery
+                        if signals and feed_monitor.are_params_stale():
+                            _conf_mult = feed_monitor.confidence_multiplier
+                            for _sig in signals:
+                                if hasattr(_sig, 'confidence') and _sig.confidence is not None:
+                                    _sig.confidence *= _conf_mult
+                            logger.info(
+                                "V12-2.3: OU params stale — signal confidence reduced "
+                                "by %.0f%% (%d signals)",
+                                (1 - _conf_mult) * 100, len(signals),
+                            )
 
                         # 4. Process signals (with intraday risk control gate)
                         if signals and intraday_controls:
@@ -1186,7 +1509,7 @@ def main():
                                 var_monitor, corr_limiter,
                             )
 
-                        # 5. Check strategy exits
+                        # 5. Check strategy exits (always runs — uses cached prices if feed down)
                         check_all_exits(
                             current, risk, stat_mr, kalman_pairs, micro_mom,
                             orb_strategy, pead_strategy, ws_monitor,
@@ -1228,14 +1551,51 @@ def main():
                                 except Exception as e:
                                     logger.error(f"Watchdog check failed: {e}")
 
-                        # V9: Position reconciliation (every 30 min)
-                        if reconciler:
-                            if (current - last_reconciliation).total_seconds() >= config.RECONCILIATION_INTERVAL:
+                        # V9 + V12 3.1: Position reconciliation (every 30 min)
+                        if (current - last_reconciliation).total_seconds() >= config.RECONCILIATION_INTERVAL:
+                            if reconciler:
                                 try:
                                     reconciler.reconcile()
-                                    last_reconciliation = current
                                 except Exception as e:
                                     logger.error(f"Reconciliation failed: {e}")
+                            if v11_reconciler:
+                                try:
+                                    _recon_report = v11_reconciler.reconcile()
+                                    if _recon_report.has_issues:
+                                        logger.warning(
+                                            f"V12 3.1: Reconciliation found {len(_recon_report.discrepancies)} "
+                                            f"discrepancies ({_recon_report.auto_healed_count} auto-healed)"
+                                        )
+                                except Exception as e:
+                                    logger.error(f"V12 3.1: V11 reconciliation failed (fail-open): {e}")
+                            last_reconciliation = current
+
+                        # V12 2.5: Corporate action check (every 30 min)
+                        if corp_action_detector:
+                            if (current - last_corp_action_check).total_seconds() >= 1800:
+                                try:
+                                    open_symbols = list(risk.open_trades.keys())
+                                    if open_symbols:
+                                        actions = corp_action_detector.check_actions(open_symbols)
+                                        if actions:
+                                            for action in actions:
+                                                logger.warning(
+                                                    f"V12 2.5: Corporate action detected — "
+                                                    f"{action.symbol} {action.action_type.value} "
+                                                    f"effective {action.effective_date}"
+                                                )
+                                            adjustments = corp_action_detector.apply_adjustments(
+                                                actions, risk.open_trades,
+                                            )
+                                            if adjustments:
+                                                for adj in adjustments:
+                                                    logger.info(
+                                                        f"V12 2.5: Position adjusted — "
+                                                        f"{adj.symbol} {adj.reason}"
+                                                    )
+                                except Exception as e:
+                                    logger.error(f"V12 2.5: Corporate action check failed (fail-open): {e}")
+                                last_corp_action_check = current
 
                         # Check shadow exits
                         check_shadow_exits(current)
@@ -1243,6 +1603,29 @@ def main():
                     # EOD: close day-hold positions + respect overnight holds (BUG-034, BUG-039)
                     if current_time >= config.ORB_EXIT_TIME:
                         eod_close(current, risk, ws_monitor, overnight_manager, regime)
+
+                        # V12 3.1: Reconciliation at market close (once per day)
+                        if not reconciled_at_close_today:
+                            reconciled_at_close_today = True
+                            if v11_reconciler:
+                                try:
+                                    _close_report = v11_reconciler.reconcile()
+                                    if _close_report.has_issues:
+                                        logger.warning(
+                                            f"V12 3.1: Close reconciliation found "
+                                            f"{len(_close_report.discrepancies)} discrepancies "
+                                            f"({_close_report.auto_healed_count} auto-healed)"
+                                        )
+                                    else:
+                                        logger.info("V12 3.1: Close reconciliation — all positions reconciled")
+                                except Exception as e:
+                                    logger.error(f"V12 3.1: Close reconciliation failed (fail-open): {e}")
+                            if reconciler:
+                                try:
+                                    reconciler.reconcile()
+                                    last_reconciliation = current
+                                except Exception as e:
+                                    logger.error(f"V12 3.1: V9 close reconciliation failed: {e}")
 
                     # Sync with broker
                     # V10 BUG-026: Always sync with broker regardless of WebSocket state
@@ -1351,6 +1734,31 @@ def main():
                                             logger.info(f"V11.4: BL weights: {bl_weights}")
                         except Exception as e:
                             logger.debug(f"V11.4: Black-Litterman EOD optimization skipped: {e}")
+
+                    # V12 14.3: Tax-loss harvesting scan on Fridays at EOD
+                    if current.weekday() == 4:  # Friday
+                        try:
+                            from ops.tax_harvesting import TaxLossHarvester
+                            _tax_harvester = TaxLossHarvester()
+                            _opportunities = _tax_harvester.scan_opportunities(
+                                list(risk.open_trades.values())
+                            )
+                            if _opportunities:
+                                logger.info(
+                                    "V12 14.3: Found %d tax-loss harvesting opportunities "
+                                    "(total estimated savings: $%.2f)",
+                                    len(_opportunities),
+                                    sum(o.estimated_loss for o in _opportunities),
+                                )
+                                for opp in _opportunities:
+                                    logger.info(
+                                        "  TLH: %s — sell %d shares, est loss $%.2f, "
+                                        "substitutes: %s",
+                                        opp.symbol, opp.shares_to_sell,
+                                        opp.estimated_loss, opp.substitute_symbols,
+                                    )
+                        except Exception as e:
+                            logger.debug("V12 14.3: Tax harvesting scan failed (non-fatal): %s", e)
 
                     eod_summary_printed = True
 
@@ -1481,8 +1889,29 @@ def main():
                     )
                 )
 
-                # T4-006: Dynamic scan interval — adjusts based on VIX regime
+                # T4-006 + V12 BONUS: Dynamic scan interval
                 scan_interval = compute_dynamic_scan_interval(config.SCAN_INTERVAL_SEC)
+                # BONUS: Further optimize with regime + position count + time-of-day
+                if get_adaptive_scan_interval and regime:
+                    try:
+                        vix = get_vix_level()
+                        bonus_interval = get_adaptive_scan_interval(
+                            vix_level=vix,
+                            regime=regime,
+                            num_open_positions=len(risk.open_trades),
+                            hour=current.hour,
+                        )
+                        scan_interval = min(scan_interval, bonus_interval)
+                    except Exception:
+                        pass
+                # V12 BONUS: Update intraday vol regime
+                if _intraday_vol_regime:
+                    try:
+                        spy_snap = get_snapshot("SPY")
+                        if spy_snap and hasattr(spy_snap, "latest_trade"):
+                            _intraday_vol_regime.update(float(spy_snap.latest_trade.price))
+                    except Exception:
+                        pass
                 for _ in range(scan_interval):
                     time_mod.sleep(1)
 

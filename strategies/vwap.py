@@ -88,6 +88,10 @@ class VWAPStrategy:
                     assert len(close) >= 2, f"Need >=2 bars for OU fit, got {len(close)}"
                     ou = fit_ou_params(close.iloc[:-1])
                     if ou:
+                        # V12 2.4: OU sigma zero guard — skip if sigma ~0 (low-vol period)
+                        if ou['sigma'] < 1e-10:
+                            logger.debug(f"VWAP skip {symbol}: OU sigma ~0 (low-vol period)")
+                            continue
                         ou_zscore = compute_zscore(last_price, ou['mu'], ou['sigma'])
                     else:
                         logger.debug("T1-010: OU fit returned empty for %s, z-score=NaN", symbol)

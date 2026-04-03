@@ -14,19 +14,22 @@ class TestKellyEngine:
     def test_get_fraction_disabled(self, override_config):
         """When KELLY_ENABLED=False, always returns flat rate."""
         from risk.kelly import KellyEngine
+        import config
         engine = KellyEngine()
         with override_config(KELLY_ENABLED=False):
-            assert engine.get_fraction("STAT_MR") == 0.008
+            assert engine.get_fraction("STAT_MR") == config.RISK_PER_TRADE_PCT
 
     def test_get_fraction_no_data(self):
         """Without compute_fractions, returns flat rate."""
         from risk.kelly import KellyEngine
+        import config
         engine = KellyEngine()
-        assert engine.get_fraction("STAT_MR") == 0.008
+        assert engine.get_fraction("STAT_MR") == config.RISK_PER_TRADE_PCT
 
     def test_compute_fractions_insufficient_trades(self, override_config):
         """With < KELLY_MIN_TRADES, falls back to flat rate."""
         from risk.kelly import KellyEngine
+        import config
 
         # Only 5 trades (less than KELLY_MIN_TRADES=30)
         mock_trades = [{"pnl": 10.0, "pnl_pct": 0.01}] * 5
@@ -37,7 +40,7 @@ class TestKellyEngine:
                 with patch("database.save_kelly_params"):
                     engine = KellyEngine()
                     engine.compute_fractions()
-                    assert engine.get_fraction("STAT_MR") == 0.008
+                    assert engine.get_fraction("STAT_MR") == config.RISK_PER_TRADE_PCT
 
     def test_compute_fractions_positive_kelly(self, override_config):
         """With profitable history, Kelly fraction is > min risk."""

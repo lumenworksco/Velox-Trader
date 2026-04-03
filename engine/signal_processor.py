@@ -192,9 +192,11 @@ def _get_ml_model():
     return _state.ml_model
 
 
-# T5-004: FinBERT NLP sentiment integration (fail-open)
+# T5-004 + V12 8.1: FinBERT NLP sentiment integration (fail-open)
+# V12 8.1: Uses new ml.finbert_sentiment (ProsusAI/finbert directly) with
+# fallback to legacy ml.models.fingpt.FinBERTSentiment.
 def _get_finbert_sentiment():
-    """Lazy-load FinBERTSentiment (singleton, fail-open)."""
+    """Lazy-load FinBERT sentiment scorer (singleton, fail-open)."""
     if _state.finbert_load_attempted:
         return _state.finbert_sentiment
     with _state.lock:
@@ -203,13 +205,28 @@ def _get_finbert_sentiment():
         _state.finbert_load_attempted = True
         try:
             if getattr(config, "NLP_SENTIMENT_ENABLED", False):
-                from ml.models.fingpt import FinBERTSentiment
-                _state.finbert_sentiment = FinBERTSentiment()
-                logger.info("T5-004: FinBERTSentiment loaded successfully")
+                # V12 8.1: Try new dedicated FinBERT scorer first
+                try:
+                    from ml.finbert_sentiment import get_finbert_scorer
+                    scorer = get_finbert_scorer()
+                    if scorer.is_available:
+                        _state.finbert_sentiment = scorer
+                        logger.info("V12 8.1: FinBERT local scorer loaded (ProsusAI/finbert)")
+                    else:
+                        logger.info("V12 8.1: FinBERT model not available, trying legacy")
+                        raise ImportError("model not available")
+                except (ImportError, Exception):
+                    # Legacy fallback
+                    try:
+                        from ml.models.fingpt import FinBERTSentiment
+                        _state.finbert_sentiment = FinBERTSentiment()
+                        logger.info("T5-004: FinBERTSentiment loaded (legacy fallback)")
+                    except Exception as e2:
+                        logger.info("T5-004: FinBERTSentiment also failed: %s", e2)
             else:
                 logger.info("T5-004: NLP_SENTIMENT_ENABLED=False, skipping FinBERT")
         except Exception as e:
-            logger.info("T5-004: FinBERTSentiment load skipped (fail-open): %s", e)
+            logger.info("T5-004: FinBERT load skipped (fail-open): %s", e)
     return _state.finbert_sentiment
 
 
@@ -316,6 +333,48 @@ def _is_in_cooldown(symbol: str, now: datetime) -> bool:
             del _state.stopout_cooldowns[symbol]
             return False
         return True
+
+
+def _check_sector_exposure(symbol: str, entry_price: float, risk: RiskManager) -> tuple[bool, str]:
+    """V12 6.2: Check if adding this symbol would exceed sector exposure limit.
+
+    Uses config.SECTOR_MAP to determine the sector of the new symbol and all
+    open positions. If the sector would exceed MAX_SECTOR_EXPOSURE (30%) of
+    portfolio value, the signal is blocked.
+
+    Returns:
+        (allowed, reason) — True if the trade is allowed.
+    """
+    max_sector_pct = getattr(config, "MAX_SECTOR_EXPOSURE", 0.30)
+    sector_map = getattr(config, "SECTOR_MAP", {})
+    new_sector = sector_map.get(symbol)
+
+    if not new_sector:
+        # Unknown sector — allow (fail-open)
+        return True, ""
+
+    equity = risk.current_equity
+    if equity <= 0:
+        return True, ""
+
+    # Calculate current sector exposure from open trades
+    sector_value = 0.0
+    for sym, trade in risk.open_trades.items():
+        trade_sector = sector_map.get(sym)
+        if trade_sector == new_sector:
+            sector_value += trade.entry_price * trade.qty
+
+    # Estimate notional of the new position (rough: 1 share * entry_price as proxy)
+    # The actual qty isn't known yet at this stage, so we check if the sector is
+    # already at/above the limit. If it is, block; otherwise allow.
+    current_sector_pct = sector_value / equity if equity > 0 else 0.0
+
+    if current_sector_pct >= max_sector_pct:
+        return False, (
+            f"sector_exposure_{new_sector}_{current_sector_pct:.0%}_gte_{max_sector_pct:.0%}"
+        )
+
+    return True, ""
 
 
 def cleanup_stale_vpin_instances(active_symbols: set[str] | None = None) -> int:
@@ -596,6 +655,92 @@ def _pairs_atomic_rollback(leg1_order_id: str, symbol: str) -> bool:
     return False
 
 
+def _resolve_signal_conflicts(signals: list[Signal], now: datetime) -> list[Signal]:
+    """V12 12.1: Resolve conflicting signals for the same symbol.
+
+    Rules:
+    - Same symbol, same direction: keep highest conviction only (deduplicate).
+    - Same symbol, opposite directions: skip both (conflicting = no edge).
+
+    Returns a filtered list of signals with conflicts removed.
+    """
+    from collections import defaultdict
+
+    by_symbol: dict[str, list[Signal]] = defaultdict(list)
+    for sig in signals:
+        by_symbol[sig.symbol].append(sig)
+
+    resolved: list[Signal] = []
+    for symbol, sym_signals in by_symbol.items():
+        if len(sym_signals) == 1:
+            resolved.append(sym_signals[0])
+            continue
+
+        # Check for direction conflicts
+        sides = {s.side for s in sym_signals}
+        if len(sides) > 1:
+            # Opposite directions — skip all signals for this symbol
+            logger.info(
+                "V12 12.1: Conflicting signals for %s — %s — skipping all",
+                symbol,
+                ", ".join(f"{s.strategy}:{s.side}" for s in sym_signals),
+            )
+            for sig in sym_signals:
+                database.log_signal(
+                    now, sig.symbol, sig.strategy, sig.side, False, "signal_conflict"
+                )
+            continue
+
+        # Same direction — keep highest conviction
+        best = max(sym_signals, key=lambda s: _signal_conviction(s))
+        dropped = [s for s in sym_signals if s is not best]
+        if dropped:
+            logger.info(
+                "V12 12.1: Dedup %s — keeping %s (conviction %.2f), dropping %s",
+                symbol,
+                best.strategy,
+                _signal_conviction(best),
+                ", ".join(s.strategy for s in dropped),
+            )
+            for sig in dropped:
+                database.log_signal(
+                    now, sig.symbol, sig.strategy, sig.side, False, "signal_dedup"
+                )
+        resolved.append(best)
+
+    if len(resolved) < len(signals):
+        logger.info(
+            "V12 12.1: Signal conflict resolution: %d -> %d signals",
+            len(signals), len(resolved),
+        )
+    return resolved
+
+
+def _signal_conviction(signal: Signal) -> float:
+    """V12 2.11: Compute a conviction score for signal prioritization.
+
+    Uses the signal's confidence field (0.0-1.0) as primary sort key,
+    with risk/reward ratio as a tiebreaker. Higher = more conviction.
+    """
+    # Primary: strategy-assigned confidence (default 0.5)
+    score = signal.confidence
+
+    # Tiebreaker: risk/reward ratio (normalized to ~0.0-0.5 range)
+    if signal.entry_price > 0 and signal.stop_loss > 0 and signal.take_profit > 0:
+        if signal.side == "buy":
+            reward = signal.take_profit - signal.entry_price
+            risk = signal.entry_price - signal.stop_loss
+        else:
+            reward = signal.entry_price - signal.take_profit
+            risk = signal.stop_loss - signal.entry_price
+        if risk > 0:
+            rr_ratio = reward / risk
+            # Normalize: RR of 2.0 adds ~0.2 to score, capped at 0.5
+            score += min(rr_ratio * 0.1, 0.5)
+
+    return score
+
+
 def process_signals(
     signals: list[Signal],
     risk: RiskManager,
@@ -622,6 +767,9 @@ def process_signals(
             database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "pnl_halt")
         return
 
+    # V12 12.1: Signal conflict resolution — deduplicate and resolve opposing signals
+    signals = _resolve_signal_conflicts(signals, now)
+
     # V11.5: Market breadth filter — if > 85% of signals lean one direction,
     # reduce position sizes by 50% to avoid crowded-trade risk.
     breadth_mult = 1.0
@@ -647,13 +795,33 @@ def process_signals(
         else:
             non_pair_signals.append(signal)
 
+    # V12 2.11: Intra-scan position limit — during market crashes all z-scores
+    # hit entry simultaneously. Sort by conviction (highest first) and cap new
+    # entries per scan cycle to prevent opening 40+ positions at once.
+    max_new = getattr(config, 'MAX_NEW_ENTRIES_PER_SCAN', 5)
+    non_pair_signals.sort(key=lambda s: _signal_conviction(s), reverse=True)
+
     # Process non-pair signals
     _batch_accepted_symbols: list[str] = []
+    _new_entries_this_scan = 0
     for signal in non_pair_signals:
+        # V12 2.11: Enforce intra-scan entry limit
+        if _new_entries_this_scan >= max_new:
+            logger.info(
+                "V12 2.11: Intra-scan limit reached (%d/%d) — skipping %s %s %s",
+                _new_entries_this_scan, max_new, signal.strategy, signal.side, signal.symbol,
+            )
+            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "intra_scan_limit")
+            continue
+
+        prev_open = set(risk.open_trades.keys())
         _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
                                var_monitor, corr_limiter, batch_accepted=_batch_accepted_symbols,
                                breadth_mult=breadth_mult)
+        # Track if a new position was actually opened
+        if signal.symbol in risk.open_trades and signal.symbol not in prev_open:
+            _new_entries_this_scan += 1
 
     # Process pairs atomically (both legs or neither)
     # CRIT-009: Lock around pair submission to prevent unhedged exposure
@@ -845,6 +1013,14 @@ def _process_single_signal(
         database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
         return
 
+    # 5a0. V12 6.2: Sector exposure enforcement — block if sector > MAX_SECTOR_EXPOSURE
+    sector_exposure_ok, sector_reason = _check_sector_exposure(signal.symbol, signal.entry_price, risk)
+    if not sector_exposure_ok:
+        skip_reason = sector_reason
+        logger.info(f"V12 6.2: Trade blocked for {signal.symbol}: {sector_reason}")
+        database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
+        return
+
     # 5a. V10: Correlation-based concentration check (skip for pairs — inherently correlated)
     if corr_limiter and signal.strategy != "KALMAN_PAIRS":
         try:
@@ -909,7 +1085,21 @@ def _process_single_signal(
         strategy=signal.strategy,
         side=signal.side,
         pnl_lock_mult=lock_mult,
+        now=now,  # V12 4.1 + 4.3: intraday session & Friday EOW multipliers
     )
+
+    # V12 6.3: Drawdown-based sizing — smooth multiplier reduces size as drawdown
+    # deepens: at 4% DD -> 50% size, at 6.4% DD -> 20% (minimum).
+    if risk.starting_equity > 0 and risk.current_equity < risk.starting_equity:
+        current_drawdown = (risk.starting_equity - risk.current_equity) / risk.starting_equity
+        max_dd = getattr(config, "MAX_ACCEPTABLE_DRAWDOWN", 0.08)
+        drawdown_mult = max(0.2, 1.0 - (current_drawdown / max_dd))
+        if drawdown_mult < 1.0:
+            qty = max(1, int(qty * drawdown_mult))
+            logger.info(
+                "V12 6.3: Drawdown sizing for %s: DD=%.2f%% mult=%.2f",
+                signal.symbol, current_drawdown * 100, drawdown_mult,
+            )
 
     # Regime affinity multiplier (fail-open)
     regime_mult = 1.0
@@ -1044,25 +1234,36 @@ def _process_single_signal(
         except Exception as e:
             logger.debug("WIRE-003: VPIN check failed for %s (fail-open): %s", signal.symbol, e)
 
-    # T5-004: FinBERT NLP sentiment multiplier (fail-open)
+    # T5-004 + V12 8.1: FinBERT NLP sentiment multiplier (fail-open)
+    # V12 8.1: Uses new FinBERTSentimentScorer.get_sentiment_multiplier() with
+    # fallback to legacy FinBERTSentiment.get_sentiment_signal().
     finbert_mult = 1.0
     if getattr(config, "NLP_SENTIMENT_ENABLED", False):
         try:
             finbert = _get_finbert_sentiment()
             if finbert is not None and news_sentiment:
-                # Use existing news headlines if available from news_sentiment module
+                # V12 8.1: Fetch headlines via news_sentiment.get_recent_headlines
                 headlines = []
                 try:
                     headlines = news_sentiment.get_recent_headlines(signal.symbol)
                 except (AttributeError, Exception):
                     pass
                 if headlines:
-                    finbert_mult, finbert_reason = finbert.get_sentiment_signal(signal.symbol, headlines)
+                    # V12 8.1: New scorer uses get_sentiment_multiplier
+                    if hasattr(finbert, 'get_sentiment_multiplier'):
+                        finbert_mult, finbert_reason = finbert.get_sentiment_multiplier(
+                            signal.symbol, headlines
+                        )
+                    else:
+                        # Legacy fallback
+                        finbert_mult, finbert_reason = finbert.get_sentiment_signal(
+                            signal.symbol, headlines
+                        )
                     if finbert_mult == 0.0:
                         database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, finbert_reason)
                         return
         except Exception as e:
-            logger.debug("T5-004: FinBERT check failed for %s (fail-open): %s", signal.symbol, e)
+            logger.debug("V12 8.1: FinBERT check failed for %s (fail-open): %s", signal.symbol, e)
 
     # T5-013: Lead-lag bias multiplier (fail-open)
     lead_lag_mult = 1.0

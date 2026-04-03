@@ -38,6 +38,20 @@ from data.quality import (
     get_quality_framework,
 )
 
+# --- V12 Item 2.3: Data feed monitor ---
+from data.feed_monitor import DataFeedMonitor, get_feed_monitor
+
+# --- V12 12.2: Overnight gap analysis ---
+from data.gap_analysis import (
+    GapType,
+    GapInfo,
+    compute_gaps,
+    get_gap_flags,
+    get_gap_info,
+    get_mr_candidates,
+    get_breakout_candidates,
+)
+
 __all__ = [
     # Original data functions
     "get_trading_client",
@@ -71,4 +85,15 @@ __all__ = [
     "QualityIssue",
     "check_bar_quality",
     "get_quality_framework",
+    # Data feed monitor (V12 Item 2.3)
+    "DataFeedMonitor",
+    "get_feed_monitor",
+    # Gap analysis (V12 12.2)
+    "GapType",
+    "GapInfo",
+    "compute_gaps",
+    "get_gap_flags",
+    "get_gap_info",
+    "get_mr_candidates",
+    "get_breakout_candidates",
 ]

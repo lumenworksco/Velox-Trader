@@ -83,6 +83,18 @@ class AlpacaNewsSentiment:
             log.warning("News sentiment fetch failed for %s: %s", symbol, exc)
             return (1.0, "news_unavailable")
 
+    def get_recent_headlines(self, symbol: str) -> list[str]:
+        """Return recent headlines for *symbol* (up to 5, last 6 hours).
+
+        V12 8.1: Added so that FinBERT can score the same headlines that
+        the keyword scorer uses.  Returns an empty list on failure.
+        """
+        try:
+            return self._fetch_headlines(symbol)
+        except Exception as exc:
+            log.debug("get_recent_headlines failed for %s: %s", symbol, exc)
+            return []
+
     def clear_daily_cache(self) -> None:
         """Drop all cached entries (call at start of trading day)."""
         self._cache.clear()

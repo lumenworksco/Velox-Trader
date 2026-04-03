@@ -1,19 +1,27 @@
-"""Smart Order Routing — choose order type and timing based on signal context."""
+"""V12 shim: smart_routing.py -> execution/smart_router.py.
+
+FillMonitor has been migrated to execution/smart_router.py.
+The legacy SmartOrderRouter (with its simpler .route() API) is preserved
+here for backward compatibility — it has a different interface than the
+production execution.smart_router.SmartOrderRouter.route_order().
+"""
 
 import logging
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import config
 from strategies.base import Signal
+
+# Re-export FillMonitor from its canonical home
+from execution.smart_router import FillMonitor  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class OrderParams:
-    """Parameters decided by the smart router for order submission."""
+    """Parameters decided by the legacy smart router for order submission."""
     order_type: str  # "market", "limit", "ioc"
     limit_price: float | None
     urgency: str  # "high", "medium", "low"
@@ -30,7 +38,12 @@ _MEAN_REVERSION = {"STAT_MR", "VWAP", "KALMAN_PAIRS"}
 
 
 class SmartOrderRouter:
-    """Choose order type and timing based on signal urgency, liquidity, and spread."""
+    """Legacy order router — choose order type and timing based on signal context.
+
+    NOTE: The production router is execution.smart_router.SmartOrderRouter
+    which has microstructure-aware routing via route_order(). This class is
+    kept for backward compatibility with code that calls .route().
+    """
 
     def route(
         self,
@@ -39,16 +52,7 @@ class SmartOrderRouter:
         spread_pct: float = 0.0,
         equity: float = 100_000.0,
     ) -> OrderParams:
-        """Decision tree for order routing.
-
-        1. If disabled globally, return plain market order.
-        2. If spread > SPREAD_THRESHOLD_PCT: limit at mid-price, medium urgency.
-        3. If time-sensitive (ORB, MICRO_MOM): IOC market order, high urgency.
-        4. If large order (qty * price > equity * 0.03): TWAP with adaptive slices.
-        5. If mean-reversion (STAT_MR, VWAP, KALMAN_PAIRS): limit at entry_price, low urgency.
-        6. If PEAD: limit at entry +/- 0.3%, medium urgency.
-        Default: market order.
-        """
+        """Decision tree for order routing."""
         if not config.SMART_ROUTING_ENABLED:
             return OrderParams(
                 order_type="market",
@@ -135,12 +139,7 @@ class SmartOrderRouter:
     def compute_adaptive_twap(
         self, signal: Signal, qty: int, urgency: str
     ) -> tuple[int, int]:
-        """Compute (n_slices, interval_sec) based on urgency.
-
-        High urgency:   3 slices, 15 sec
-        Medium urgency: 5 slices, 30 sec
-        Low urgency:    8 slices, 60 sec
-        """
+        """Compute (n_slices, interval_sec) based on urgency."""
         table = {
             "high": (3, 15),
             "medium": (5, 30),
@@ -148,7 +147,6 @@ class SmartOrderRouter:
         }
         return table.get(urgency, (5, 30))
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _infer_urgency(signal: Signal) -> str:
         """Infer urgency from the signal's strategy."""
@@ -157,92 +155,3 @@ class SmartOrderRouter:
         if signal.strategy in _MEAN_REVERSION:
             return "low"
         return "medium"
-
-
-class FillMonitor:
-    """Monitors pending orders and tracks fill quality."""
-
-    def __init__(self):
-        self._pending: dict[str, dict] = {}  # order_id -> {signal, submit_time, qty}
-        self._fill_stats: dict[str, list] = {}  # strategy -> [slippage_pcts]
-        self._lock = threading.Lock()
-
-    def register_order(
-        self, order_id: str, signal: Signal, submit_time: datetime, qty: int
-    ):
-        """Register a new pending order for monitoring."""
-        self._pending[order_id] = {
-            "signal": signal,
-            "submit_time": submit_time,
-            "qty": qty,
-        }
-        logger.debug(f"FillMonitor: registered order {order_id} for {signal.symbol}")
-
-    def check_pending(self, now: datetime) -> list[dict]:
-        """Check pending orders and return recommended actions.
-
-        Returns list of actions:
-        - After CHASE_AFTER_SECONDS:          {action: "chase", order_id, new_price}
-        - After CHASE_CONVERT_MARKET_AFTER:   {action: "convert_market", order_id}
-
-        Fail-open: returns empty list on error.
-        """
-        try:
-            actions: list[dict] = []
-            for order_id, info in list(self._pending.items()):
-                elapsed = (now - info["submit_time"]).total_seconds()
-                signal: Signal = info["signal"]
-
-                if elapsed >= config.CHASE_CONVERT_MARKET_AFTER:
-                    actions.append({
-                        "action": "convert_market",
-                        "order_id": order_id,
-                    })
-                elif elapsed >= config.CHASE_AFTER_SECONDS:
-                    # Chase: move limit closer to current price (use entry as proxy)
-                    if signal.side == "buy":
-                        new_price = round(signal.entry_price * 1.001, 2)
-                    else:
-                        new_price = round(signal.entry_price * 0.999, 2)
-                    actions.append({
-                        "action": "chase",
-                        "order_id": order_id,
-                        "new_price": new_price,
-                    })
-
-            return actions
-        except Exception:
-            logger.exception("FillMonitor.check_pending failed — fail-open")
-            return []
-
-    def remove_order(self, order_id: str):
-        """Remove an order from pending tracking (after fill or cancel)."""
-        self._pending.pop(order_id, None)
-
-    def record_fill(
-        self, order_id: str, fill_price: float, expected_price: float, strategy: str
-    ):
-        """Record fill quality for analytics."""
-        if expected_price == 0:
-            return
-        slippage_pct = (fill_price - expected_price) / expected_price
-        with self._lock:
-            self._fill_stats.setdefault(strategy, []).append(slippage_pct)
-        self.remove_order(order_id)
-        logger.info(
-            f"Fill recorded: order={order_id} strategy={strategy} "
-            f"slippage={slippage_pct:.4%}"
-        )
-
-    def get_slippage_stats(self) -> dict[str, float]:
-        """Return average slippage per strategy."""
-        with self._lock:
-            result: dict[str, float] = {}
-            for strategy, slippages in self._fill_stats.items():
-                if slippages:
-                    result[strategy] = sum(slippages) / len(slippages)
-            return result
-
-    @property
-    def pending_count(self) -> int:
-        return len(self._pending)

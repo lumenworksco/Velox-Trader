@@ -12,6 +12,6 @@ echo "Running pre-launch backup..."
 bash scripts/backup.sh || echo "Backup skipped"
 
 echo "Starting Velox V10 Trading Bot..."
-nohup python3 main.py "$@" > /dev/null 2>&1 &
+nohup python3 main.py "$@" >> bot.log 2>&1 &
 echo "Bot started with PID $!"
 echo $! > .bot.pid

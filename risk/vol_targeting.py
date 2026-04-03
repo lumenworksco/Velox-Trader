@@ -8,10 +8,12 @@ Target: 1% daily portfolio volatility.
 
 import logging
 import threading
+from datetime import datetime
 
 import numpy as np
 
 import config
+from risk.risk_manager import get_time_of_day_multiplier, get_friday_eow_multiplier
 from utils import safe_divide
 
 logger = logging.getLogger(__name__)
@@ -87,12 +89,14 @@ class VolatilityTargetingRiskEngine:
         strategy: str = "",
         side: str = "buy",
         pnl_lock_mult: float = 1.0,
+        now: datetime | None = None,
     ) -> int:
         """
         Position sizing with volatility targeting.
 
         Base: risk RISK_PER_TRADE_PCT of portfolio per trade.
-        Then: scale by vol_scalar, strategy allocation, and PnL lock multiplier.
+        Then: scale by vol_scalar, strategy allocation, PnL lock multiplier,
+        intraday session multiplier (V12 4.1), and Friday EOW reduction (V12 4.3).
 
         Args:
             equity: Current portfolio equity
@@ -102,6 +106,7 @@ class VolatilityTargetingRiskEngine:
             strategy: Strategy name for allocation weighting
             side: 'buy' or 'sell'
             pnl_lock_mult: From DailyPnLLock.get_size_multiplier()
+            now: Current datetime for intraday/Friday adjustments (optional)
 
         Returns:
             Number of shares (int), 0 if position is too small
@@ -155,6 +160,15 @@ class VolatilityTargetingRiskEngine:
         if side == "sell":
             position_value *= config.SHORT_SIZE_MULTIPLIER
 
+        # 6b. V12 4.1: Intraday session-based position sizing
+        # 6c. V12 4.3: Friday end-of-week risk reduction
+        tod_mult = 1.0
+        friday_mult = 1.0
+        if now is not None:
+            tod_mult = get_time_of_day_multiplier(now)
+            friday_mult = get_friday_eow_multiplier(now)
+            position_value *= tod_mult * friday_mult
+
         # 7. Hard caps
         max_position = equity * config.MAX_POSITION_PCT
         min_position = config.MIN_POSITION_VALUE
@@ -170,7 +184,8 @@ class VolatilityTargetingRiskEngine:
         logger.debug(
             f"VolTarget sizing: {strategy} → {sizing_path} risk_pct={risk_pct:.4f} "
             f"vol_scalar={vol_scalar:.2f} pnl_lock={pnl_lock_mult:.2f} "
-            f"alloc={allocation:.3f} → qty={qty} (${qty * entry_price:.0f})"
+            f"alloc={allocation:.3f} tod={tod_mult:.2f} fri={friday_mult:.2f} "
+            f"→ qty={qty} (${qty * entry_price:.0f})"
         )
         return qty
 

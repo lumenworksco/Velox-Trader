@@ -129,6 +129,61 @@ services:
           cpus: "0.5"
           memory: 256M
 
+  # V12 15.3: Automated daily backups — PostgreSQL pg_dump + SQLite bot.db copy
+  backup:
+    image: postgres:16-alpine
+    container_name: velox-backup
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-velox}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGDATABASE: ${POSTGRES_DB:-velox}
+    volumes:
+      - ./backups:/backups
+      - ./bot.db:/app/bot.db:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "Velox backup service started — daily at 02:00 UTC"
+        while true; do
+          # Sleep until next 02:00 UTC
+          now=$$(date +%s)
+          target=$$(date -d "tomorrow 02:00" +%s 2>/dev/null || date -d "02:00 tomorrow" +%s 2>/dev/null)
+          # Fallback: just sleep 24h if date parsing fails
+          sleep_secs=$${target:+$$((target - now))}
+          sleep $${sleep_secs:-86400}
+
+          ts=$$(date +%Y%m%d_%H%M%S)
+          echo "[$$ts] Starting backups..."
+
+          # PostgreSQL backup
+          pg_dump -Fc -f "/backups/velox_pg_$$ts.dump" && \
+            echo "[$$ts] PostgreSQL backup OK" || \
+            echo "[$$ts] PostgreSQL backup FAILED"
+
+          # SQLite backup (simple copy, safe for read-only mount)
+          if [ -f /app/bot.db ]; then
+            cp /app/bot.db "/backups/bot_$$ts.db" && \
+              echo "[$$ts] SQLite backup OK" || \
+              echo "[$$ts] SQLite backup FAILED"
+          fi
+
+          # Prune backups older than 30 days
+          find /backups -name "velox_pg_*.dump" -mtime +30 -delete 2>/dev/null
+          find /backups -name "bot_*.db" -mtime +30 -delete 2>/dev/null
+          echo "[$$ts] Backup cycle complete"
+        done
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
 volumes:
   pgdata:
   promdata:

@@ -154,7 +154,7 @@ def _check_price_anomalies(bars: pd.DataFrame, symbol: str,
             check_name="price_anomaly",
             severity="warning",
             bar_index=bar_pos,
-            message=f"{symbol}: {worst_move:.1%} single-bar move at bar {bar_pos}",
+            message=f"{symbol}: Price anomaly, {worst_move:.1%} single-bar move at bar {bar_pos}",
             penalty=0.10,
         ))
 
@@ -315,7 +315,7 @@ def _check_minimum_bars(bars: pd.DataFrame, symbol: str,
         issues.append(QualityIssue(
             check_name="minimum_bars",
             severity="critical",
-            message=f"{symbol}: only {len(bars)} bars (need {min_bars})",
+            message=f"{symbol}: Only {len(bars)} bars (need {min_bars})",
             penalty=0.30,
         ))
     return issues

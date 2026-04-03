@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import config
 from data import get_snapshot, get_snapshots, get_filled_exit_price
 from execution import close_position, close_partial_position
+from execution.core import get_order_commission
 from risk import RiskManager
 
 logger = logging.getLogger(__name__)
@@ -298,8 +299,11 @@ def handle_strategy_exits(exit_actions: list[dict], risk: RiskManager, now: date
                 except Exception:
                     exit_price = trade.entry_price
 
+            # V12 6.1: Capture commission from the order
+            commission = get_order_commission(trade.order_id)
+
             pnl = (exit_price - trade.entry_price) * trade.qty * (1 if trade.side == "buy" else -1)
-            risk.close_trade(symbol, exit_price, now, exit_reason=reason)
+            risk.close_trade(symbol, exit_price, now, exit_reason=reason, commission=commission)
 
             # V11.5: Clean up advanced exit tracking state
             cleanup_exit_state(symbol)
@@ -365,7 +369,10 @@ def handle_ws_close(symbol: str, reason: str, risk: RiskManager, ws_monitor):
         except Exception:
             exit_price = trade.entry_price
 
-    risk.close_trade(symbol, exit_price, now_et(), exit_reason=reason)
+    # V12 6.1: Capture commission from the order
+    commission = get_order_commission(trade.order_id)
+
+    risk.close_trade(symbol, exit_price, now_et(), exit_reason=reason, commission=commission)
     ws_monitor.unsubscribe(symbol)
 
     notif = _get_notifications()
@@ -377,7 +384,12 @@ def handle_ws_close(symbol: str, reason: str, risk: RiskManager, ws_monitor):
 
 
 def get_current_prices(open_trades: dict) -> dict[str, float]:
-    """Fetch current prices for open trades (for beta calculation etc.)."""
+    """Fetch current prices for open trades (for beta calculation etc.).
+
+    V12-2.3: When live data fetch fails, falls back to DataFeedMonitor's
+    cached prices before using entry_price as last resort. This ensures
+    stop enforcement continues during Alpaca outages.
+    """
     symbols = list(open_trades.keys())
     if not symbols:
         return {}
@@ -389,6 +401,29 @@ def get_current_prices(open_trades: dict) -> dict[str, float]:
                 prices[sym] = float(snap.latest_trade.price)
     except Exception as e:
         logger.warning(f"Price fetch failed: {e}")
+
+    # V12-2.3: Update feed monitor cache with fresh prices, then use cache
+    # as fallback for any symbols that failed to fetch.
+    try:
+        from data.feed_monitor import get_feed_monitor
+        fm = get_feed_monitor()
+        # Cache the prices we did get
+        if prices:
+            fm.update_prices(prices)
+        # Fill in missing symbols from cache
+        missing = [s for s in symbols if s not in prices]
+        if missing:
+            cached = fm.get_cached_prices(missing)
+            for sym, cached_price in cached.items():
+                prices[sym] = cached_price
+                logger.info(
+                    "V12-2.3: Using cached price for %s: $%.2f (live fetch failed)",
+                    sym, cached_price,
+                )
+    except Exception as e:
+        logger.debug("V12-2.3: Feed monitor cache fallback failed: %s", e)
+
+    # Last resort: use entry price for any still-missing symbols
     for sym, trade in open_trades.items():
         if sym not in prices:
             prices[sym] = trade.entry_price

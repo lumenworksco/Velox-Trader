@@ -4,7 +4,7 @@ import logging
 import threading
 import time as time_mod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 from typing import NamedTuple, Optional
 
 import config
@@ -141,6 +141,57 @@ def get_vix_risk_scalar() -> float:
     return max(0.3, min(scalar, 1.3))
 
 
+# --- V12 4.1: Intraday Session-Based Position Sizing ---
+
+_INTRADAY_SESSION_WINDOWS: list[tuple[time, time, float]] = [
+    (time(9, 30), time(9, 40),  0.50),   # Open Rush — extreme vol, wide spreads
+    (time(9, 40), time(10, 0),  0.80),   # Early — still settling
+    (time(10, 0), time(11, 30), 1.00),   # Prime — normal
+    (time(11, 30), time(13, 0), 0.60),   # Lunch — low volume
+    (time(13, 0), time(15, 0),  1.00),   # Afternoon — institutional flow
+    (time(15, 0), time(15, 55), 0.70),   # Close — auction effects
+]
+
+
+def get_time_of_day_multiplier(now: datetime) -> float:
+    """V12 4.1: Return a position-sizing multiplier based on intraday session."""
+    t = now.time()
+    for start, end, mult in _INTRADAY_SESSION_WINDOWS:
+        if start <= t < end:
+            return mult
+    return 1.0
+
+
+# --- V12 4.3: Friday End-of-Week Risk Reduction ---
+
+def get_friday_eow_multiplier(now: datetime) -> float:
+    """V12 4.3: After Friday 14:00 ET, reduce new position sizes by 50%."""
+    if now.weekday() == 4 and now.time() >= time(14, 0):
+        return 0.50
+    return 1.0
+
+
+# --- V12 4.2: Strategy-Specific Time Windows ---
+
+STRATEGY_TIME_WINDOWS: dict[str, list[tuple[time, time]]] = {
+    "STAT_MR":      [(time(10, 0), time(15, 30))],
+    "VWAP":         [(time(10, 0), time(15, 30))],
+    "KALMAN_PAIRS": [(time(10, 0), time(15, 30))],
+    "ORB":          [(time(10, 0), time(12, 30))],
+    "MICRO_MOM":    [(time(9, 35), time(11, 0)), (time(13, 0), time(15, 0))],
+    "PEAD":         [(time(9, 35), time(15, 30))],
+}
+
+
+def is_strategy_in_time_window(strategy: str, now: datetime) -> bool:
+    """V12 4.2: Return True if the strategy is within its optimal trading window."""
+    windows = STRATEGY_TIME_WINDOWS.get(strategy)
+    if windows is None:
+        return True
+    t = now.time()
+    return any(start <= t < end for start, end in windows)
+
+
 @dataclass
 class TradeRecord:
     symbol: str
@@ -166,6 +217,7 @@ class TradeRecord:
     lowest_price_seen: float = 0.0   # V10: for trailing stop tracking (shorts)
     entry_atr: float = 0.0           # V4: ATR at time of entry
     partial_closed_qty: int = 0      # V10 BUG-004: cumulative qty closed via partial exits
+    commission: float = 0.0          # V12 6.1: Commission paid on this trade (entry + exit)
 
 
 @dataclass
@@ -320,6 +372,20 @@ class RiskManager:
         if vix_scalar < 1.0:
             position_value *= vix_scalar
 
+        # V12 6.3: Drawdown-based sizing — smooth multiplier reduces size as
+        # drawdown deepens: at 4% DD -> 50% size, at 6.4% DD -> 20% (minimum).
+        # drawdown_mult = max(0.2, 1.0 - (current_drawdown / max_acceptable_drawdown))
+        if self.starting_equity > 0 and self.current_equity < self.starting_equity:
+            current_drawdown = (self.starting_equity - self.current_equity) / self.starting_equity
+            max_dd = getattr(config, "MAX_ACCEPTABLE_DRAWDOWN", 0.08)
+            drawdown_mult = max(0.2, 1.0 - (current_drawdown / max_dd))
+            if drawdown_mult < 1.0:
+                position_value *= drawdown_mult
+                logger.info(
+                    "V12 6.3: Drawdown sizing: DD=%.2f%% mult=%.2f (size reduced %.0f%%)",
+                    current_drawdown * 100, drawdown_mult, (1.0 - drawdown_mult) * 100,
+                )
+
         # Check we don't exceed max deployment
         deployed = sum(t.entry_price * t.qty for t in self.open_trades.values())
         remaining_deploy = self.current_equity * config.MAX_PORTFOLIO_DEPLOY - deployed
@@ -343,8 +409,11 @@ class RiskManager:
         )
 
     def close_trade(self, symbol: str, exit_price: float, now: datetime,
-                    exit_reason: str = ""):
-        """Close a trade, record P&L, and log to database (thread-safe)."""
+                    exit_reason: str = "", commission: float = 0.0):
+        """Close a trade, record P&L, and log to database (thread-safe).
+
+        V12 6.1: commission is subtracted from gross P&L to get net P&L.
+        """
         with self._lock:
             if symbol not in self.open_trades:
                 return
@@ -353,11 +422,15 @@ class RiskManager:
         trade.exit_time = now
         trade.status = "closed"
         trade.exit_reason = exit_reason
+        trade.commission += commission  # V12 6.1: accumulate (entry commission may already be set)
 
         if trade.side == "buy":
-            trade.pnl = (exit_price - trade.entry_price) * trade.qty
+            gross_pnl = (exit_price - trade.entry_price) * trade.qty
         else:
-            trade.pnl = (trade.entry_price - exit_price) * trade.qty
+            gross_pnl = (trade.entry_price - exit_price) * trade.qty
+
+        # V12 6.1: Subtract total commission from gross P&L
+        trade.pnl = gross_pnl - trade.commission
 
         pnl_pct = trade.pnl / (trade.entry_price * trade.qty) if trade.entry_price * trade.qty > 0 else 0
 
@@ -388,6 +461,7 @@ class RiskManager:
                 exit_reason=exit_reason,
                 pnl=trade.pnl,
                 pnl_pct=pnl_pct,
+                commission=trade.commission,
             )
         except Exception as e:
             handle_failure(FailureMode.SKIP_SIGNAL, "risk_manager.log_trade_to_db", e,
@@ -414,8 +488,12 @@ class RiskManager:
                            symbol=trade.symbol, strategy=trade.strategy)
 
     def partial_close(self, symbol: str, qty_to_close: int, exit_price: float,
-                      now: datetime, exit_reason: str = "partial_tp"):
-        """Close a portion of a position. Reduces qty, logs partial P&L."""
+                      now: datetime, exit_reason: str = "partial_tp",
+                      commission: float = 0.0):
+        """Close a portion of a position. Reduces qty, logs partial P&L.
+
+        V12 6.1: commission is subtracted from partial P&L.
+        """
         if symbol not in self.open_trades:
             return
 
@@ -430,11 +508,17 @@ class RiskManager:
             f"Partial close {symbol}: qty_to_close={qty_to_close} > remaining={trade.qty}"
         )
 
+        # V12 6.1: Track commission on the trade record
+        trade.commission += commission
+
         # Calculate P&L on closed portion
         if trade.side == "buy":
-            partial_pnl = (exit_price - trade.entry_price) * qty_to_close
+            gross_pnl = (exit_price - trade.entry_price) * qty_to_close
         else:
-            partial_pnl = (trade.entry_price - exit_price) * qty_to_close
+            gross_pnl = (trade.entry_price - exit_price) * qty_to_close
+
+        # V12 6.1: Subtract commission from partial P&L
+        partial_pnl = gross_pnl - commission
 
         pnl_pct = partial_pnl / (trade.entry_price * qty_to_close) if trade.entry_price > 0 else 0
 
@@ -462,6 +546,7 @@ class RiskManager:
                 exit_reason=exit_reason,
                 pnl=partial_pnl,
                 pnl_pct=pnl_pct,
+                commission=commission,
             )
         except Exception as e:
             logger.error(f"Failed to log partial trade to DB: {e}")

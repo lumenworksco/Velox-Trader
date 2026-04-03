@@ -1,1 +1,12 @@
 Generic single-database configuration.
+
+Migration Strategy (V12 15.2)
+=============================
+- SQLite  : database.py auto-migrations are canonical. Do NOT use Alembic for SQLite.
+- PostgreSQL: Alembic migrations (this directory) are canonical. Run `alembic upgrade head`.
+
+When adding new columns or tables:
+  1. Update db/models.py with the new schema.
+  2. For SQLite users: database.py create_tables() handles schema changes automatically.
+  3. For PostgreSQL users: generate an Alembic revision with `alembic revision --autogenerate`
+     and commit it to this directory.

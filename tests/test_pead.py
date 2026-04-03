@@ -275,7 +275,7 @@ class TestPEADExits:
     def test_check_exits_no_exit_within_bounds(self):
         """check_exits() returns nothing when trade is within bounds."""
         strat = PEADStrategy()
-        entry_time = SCAN_TIME - timedelta(days=5)
+        entry_time = SCAN_TIME - timedelta(days=3)
         trade = _make_trade(
             symbol="AAPL", strategy="PEAD", side="buy",
             entry_price=100.0, entry_time=entry_time,

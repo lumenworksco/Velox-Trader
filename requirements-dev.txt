@@ -1,0 +1,11 @@
+# V12 15.5: Development & testing dependencies
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+
+pytest>=8.0
+pytest-cov>=5.0
+pytest-mock>=3.14
+mypy>=1.10
+black>=24.0
+isort>=5.13
+pylint>=3.2

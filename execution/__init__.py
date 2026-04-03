@@ -31,6 +31,7 @@ from execution.smart_router import (
     OrderTypeChoice,
     UrgencyLevel,
     MarketConditions,
+    FillMonitor,
 )
 from execution.optimal_execution import (
     AlmgrenChriss,
@@ -81,6 +82,7 @@ __all__ = [
     "OrderTypeChoice",
     "UrgencyLevel",
     "MarketConditions",
+    "FillMonitor",
     # EXEC-002: Almgren-Chriss
     "AlmgrenChriss",
     "ExecutionSlice",

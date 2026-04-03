@@ -162,9 +162,13 @@ def compute_analytics() -> dict:
         portfolio_val = portfolio_vals[-1] if portfolio_vals else 1_000_000
         daily_returns = _derive_daily_returns_from_trades(trades_all, portfolio_val)
 
-    # Weekly P&L
+    # Weekly P&L (already net of commissions — V12 6.1)
     week_pnl = sum(t.get("pnl", 0) for t in trades_7d)
     week_pnl_pct = (week_pnl / portfolio_vals[-1] * 100) if portfolio_vals else 0.0
+
+    # V12 6.1: Total commissions tracked
+    total_commissions_7d = sum(t.get("commission", 0) or 0 for t in trades_7d)
+    total_commissions_all = sum(t.get("commission", 0) or 0 for t in trades_all)
 
     # Clamp Sharpe/Sortino to reasonable range for display
     def _clamp_ratio(val: float, lo: float = -10.0, hi: float = 10.0) -> float:
@@ -184,5 +188,7 @@ def compute_analytics() -> dict:
         "strategy_breakdown": strategy_attribution(trades_7d),
         "total_trades_7d": len(trades_7d),
         "total_trades_all": len(trades_all),
+        "total_commissions_7d": round(total_commissions_7d, 2),
+        "total_commissions_all": round(total_commissions_all, 2),
     }
     return result

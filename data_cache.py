@@ -1,29 +1,35 @@
-"""V8: Data caching layer for bar data.
+"""V12 shim: data_cache.py -> data.bar_cache (the superior implementation).
 
-Caches bar data by symbol+timeframe to avoid refetching from Alpaca
-every 2-minute scan cycle for 130+ symbols.
+Production code should use data.bar_cache.bar_cache (the singleton) or
+data.bar_cache.BarCache directly. This module preserves the legacy BarCache
+with its simpler .put()/.get_bars()/.cache_stats() API so that existing
+callers and tests keep working.
+
+FillMonitor note: FillMonitor was never in this module.
 """
 
 import logging
 import threading
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 
-import config
+# Re-export the production bar_cache singleton for any code that wants it
+from data.bar_cache import bar_cache as _production_bar_cache  # noqa: F401
+from data.bar_cache import BarCache as ProductionBarCache  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 
 class BarCache:
-    """Thread-safe LRU cache for bar data.
+    """Legacy thread-safe LRU cache for bar data.
 
-    Caches bars by (symbol, timeframe) key with configurable TTL per timeframe.
-    Supports delta fetching — only requests bars newer than last cached bar.
+    NOTE: The production cache is data.bar_cache.BarCache which has
+    pre-warming, monotonic time, and better eviction. This class is kept
+    for backward compatibility with code that uses .put()/.get_bars().
     """
 
-    # TTL per timeframe in seconds
     DEFAULT_TTL = {
         "1Min": 60,
         "2Min": 60,
@@ -42,21 +48,7 @@ class BarCache:
 
     def get_bars(self, symbol: str, timeframe: str, bars: pd.DataFrame | None = None,
                  fetch_fn=None, **fetch_kwargs) -> pd.DataFrame | None:
-        """Get cached bars or fetch fresh ones.
-
-        BUG-010: Hold lock for the entire get-check-move operation to prevent
-        race conditions between LRU eviction and move_to_end().
-
-        Args:
-            symbol: Ticker symbol
-            timeframe: String representation (e.g., "1Min", "5Min", "1Day")
-            bars: If provided, store these bars directly (bypass fetch)
-            fetch_fn: Callable to fetch bars if cache miss. Signature: fetch_fn(**fetch_kwargs) -> DataFrame
-            **fetch_kwargs: Passed to fetch_fn
-
-        Returns:
-            DataFrame of bars, or None if unavailable
-        """
+        """Get cached bars or fetch fresh ones."""
         key = (symbol, timeframe)
         need_fetch = False
 
@@ -67,12 +59,10 @@ class BarCache:
                 age = (datetime.now() - entry["last_fetch"]).total_seconds()
 
                 if age < ttl:
-                    # Cache hit — move to end (most recently used)
                     self._cache.move_to_end(key)
                     self._hits += 1
                     return entry["bars"].copy() if entry["bars"] is not None else None
 
-            # Cache miss or stale — record under lock
             self._misses += 1
             need_fetch = True
 
@@ -80,14 +70,12 @@ class BarCache:
             return None
 
         if bars is not None:
-            # Caller provided bars directly
             result = bars
         elif fetch_fn is not None:
             try:
                 result = fetch_fn(**fetch_kwargs)
             except Exception as e:
                 logger.debug(f"Cache fetch failed for {symbol}/{timeframe}: {e}")
-                # Return stale data if available
                 with self._lock:
                     if key in self._cache:
                         return self._cache[key]["bars"].copy()
@@ -95,15 +83,12 @@ class BarCache:
         else:
             return None
 
-        # Store in cache — hold lock for store + move_to_end + eviction atomically
         with self._lock:
             self._cache[key] = {
                 "bars": result,
                 "last_fetch": datetime.now(),
             }
             self._cache.move_to_end(key)
-
-            # Evict oldest entries if over max size
             while len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)
 
@@ -118,12 +103,11 @@ class BarCache:
                 "last_fetch": datetime.now(),
             }
             self._cache.move_to_end(key)
-
             while len(self._cache) > self._max_size:
                 self._cache.popitem(last=False)
 
     def invalidate(self, symbol: str, timeframe: str | None = None):
-        """Remove cached data for a symbol (optionally for specific timeframe)."""
+        """Remove cached data for a symbol."""
         with self._lock:
             if timeframe:
                 self._cache.pop((symbol, timeframe), None)
@@ -153,7 +137,7 @@ class BarCache:
             }
 
 
-# Module-level singleton (BUG-010: thread-safe creation)
+# Module-level singleton (backward-compatible)
 _bar_cache: BarCache | None = None
 _bar_cache_lock = threading.Lock()
 

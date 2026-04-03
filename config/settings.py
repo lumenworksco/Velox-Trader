@@ -15,8 +15,8 @@ API_KEY = os.getenv("ALPACA_API_KEY", "")
 API_SECRET = os.getenv("ALPACA_API_SECRET", "")
 
 # Validate API credentials at import time (skip in test environments)
-_IN_TEST = os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") or "pytest" in __import__("sys").modules
-if not _IN_TEST:
+# Validate API credentials at import time (skip in test environments)
+if not os.getenv("TESTING") and not os.getenv("PYTEST_CURRENT_TEST"):
     if not API_KEY:
         raise RuntimeError("ALPACA_API_KEY environment variable is required")
     if not API_SECRET:
@@ -24,8 +24,7 @@ if not _IN_TEST:
 
 ALLOW_SHORT = os.getenv("ALLOW_SHORT", "false") == "true"
 
-BROKER_ABSTRACTION_ENABLED = True
-PAPER_BROKER_SPREAD_BPS = 5.0
+# MED-030: Removed BROKER_ABSTRACTION_ENABLED and PAPER_BROKER_SPREAD_BPS (dead code, never referenced)
 
 # ============================================================
 # MARKET HOURS (ET)
@@ -141,12 +140,14 @@ SECTOR_GROUPS = {
 # ============================================================
 
 STRATEGY_ALLOCATIONS = {
-    'STAT_MR': 0.40,
-    'VWAP': 0.20,
-    'KALMAN_PAIRS': 0.20,
-    'PEAD': 0.10,
-    'ORB': 0.05,
-    'MICRO_MOM': 0.05,
+    # V11.3 T10: Reallocated from dead strategies (COPULA_PAIRS, SECTOR_MOM, etc.)
+    # to active ones. Total = 100%.
+    'STAT_MR': 0.35,         # was 0.30 — highest Sharpe, most active
+    'VWAP': 0.20,            # was 0.15 — second most active
+    'KALMAN_PAIRS': 0.20,    # was 0.15 — diversifying, uncorrelated
+    'ORB': 0.10,             # was 0.05 — now with trailing stops
+    'MICRO_MOM': 0.10,       # was 0.05 — now with ATR-based stops
+    'PEAD': 0.05,            # was 0.08 — event-driven, low frequency
 }
 
 # --- Statistical Mean Reversion ---
@@ -163,28 +164,29 @@ MR_HALFLIFE_MAX_HOURS = 48
 MR_UNIVERSE_SIZE = 40
 MR_UNIVERSE_PREP_TIME = time(9, 0)
 MR_MIN_GAIN_PCT = 0.002
-MR_MIN_RR_RATIO = 1.5
+MR_MIN_RR_RATIO = 2.0              # Raised from 1.5 — only take trades with 2:1 R/R
+MR_MIN_STOP_PCT = 0.005            # Minimum stop distance = 0.5% of price (prevents breakeven stops)
 
 # --- VWAP Mean Reversion ---
 VWAP_OU_ZSCORE_MIN   = 1.0        # OU z-score confirmation for entries
-VWAP_MAX_SPREAD_PCT  = 0.001      # Skip if bid-ask spread > 0.1%
-VWAP_VOLUME_RATIO    = 0.8        # Volume ratio vs 20-bar average
+VWAP_MAX_SPREAD_PCT  = 0.0015     # Skip if bid-ask spread > 0.15% — tighter quality filter
+VWAP_VOLUME_RATIO    = 1.0        # Volume ratio vs 20-bar average — require above-average volume
 MAX_INTRADAY_MOVE_PCT = 0.03      # Skip if stock moved > 3% today
-VWAP_BAND_STD        = 2.0        # Standard deviation multiplier for VWAP bands
-VWAP_RSI_OVERSOLD    = 40         # RSI below this = oversold (buy signal, was 30)
+VWAP_BAND_STD        = 1.5        # Standard deviation multiplier for VWAP bands — tighter bands, more entries
+VWAP_RSI_OVERSOLD    = 45         # RSI below this = oversold (buy signal, raised from 40)
 VWAP_RSI_OVERBOUGHT  = 70         # RSI above this = overbought (short signal)
 VWAP_CONFIRMATION_BARS = 1        # Bars confirming bounce (1 = disabled)
 VWAP_STOP_EXTENSION  = 0.5        # Stop extension beyond band (in std devs)
 VWAP_MIN_STOP_PCT    = 0.01       # Minimum 1.0% stop distance (was 0.5%)
 
 # --- Kalman Pairs Trading ---
-PAIRS_ZSCORE_ENTRY = 2.0
+PAIRS_ZSCORE_ENTRY = 1.5
 PAIRS_ZSCORE_EXIT = 0.2
 PAIRS_ZSCORE_STOP = 3.0
 PAIRS_MAX_HOLD_DAYS = 10
 PAIRS_MAX_ACTIVE = 15
-PAIRS_MIN_CORRELATION = 0.80
-PAIRS_COINT_PVALUE = 0.05
+PAIRS_MIN_CORRELATION = 0.80       # Tightened from 0.70 — higher quality pairs only
+PAIRS_COINT_PVALUE = 0.05          # Tightened from 0.10 — require stronger cointegration
 KALMAN_DELTA = 1e-4
 KALMAN_OBS_NOISE = 0.001
 PAIRS_TP_PCT = 0.015   # V10: 1.5% take-profit (was 0.5% — negative EV after costs)
@@ -192,24 +194,24 @@ PAIRS_SL_PCT = 0.010   # V10: 1.0% stop-loss (was 1.5% — gives 1.5:1 R/R)
 
 # --- Opening Range Breakout ---
 ORB_ENABLED          = True
-ORB_VOLUME_RATIO     = 1.3        # Volume confirmation ratio
+ORB_VOLUME_RATIO     = 2.0        # Volume confirmation ratio — require strong volume on breakout
 ORB_MAX_GAP_PCT      = 0.04       # Skip if gap > 4%
 ORB_MAX_RANGE_PCT    = 0.035      # Skip if range > 3.5%
 ORB_MIN_STOP_PCT     = 0.008      # Minimum 0.8% stop distance (was 0.3%)
 ORB_SCAN_SYMBOLS     = 15         # Top N by morning volume
-ORB_ACTIVE_UNTIL     = time(11, 30)
-ORB_BREAKOUT_BUFFER  = 0.001      # 0.1% confirmation buffer above/below ORB range
-ORB_TP_MULT          = 1.5        # Take profit = entry ± 1.5x ORB range
-ORB_SL_MULT          = 0.5        # Stop loss = entry ∓ 0.5x ORB range
+ORB_ACTIVE_UNTIL     = time(12, 30)   # Extended from 11:30 — more signal window
+ORB_BREAKOUT_BUFFER  = 0.0025     # 0.25% confirmation buffer above/below ORB range — reduce fakeouts
+ORB_TP_MULT          = 2.0        # Take profit = entry ± 2.0x ORB range — wider target
+ORB_SL_MULT          = 0.7        # Stop loss = entry ∓ 0.7x ORB range — wider stop, fewer whipsaws
 ORB_TIME_STOP_HOURS  = 2          # Close after 2 hours
 
 # --- Micro Momentum ---
-MICRO_SPY_VOL_SPIKE_MULT = 2.0     # Was 3.0 — detect more events
-MICRO_SPY_MIN_MOVE_PCT = 0.001     # Was 0.0015 — 0.1% SPY move triggers event
-MICRO_MAX_HOLD_MINUTES = 15          # Was 8 — give trades room to work
+MICRO_SPY_VOL_SPIKE_MULT = 2.0     # Tightened from 1.5 — require stronger volume spike
+MICRO_SPY_MIN_MOVE_PCT = 0.0015    # Tightened from 0.0008 — 0.15% SPY move triggers event
+MICRO_MAX_HOLD_MINUTES = 20          # Reduced from 30 to 20 — shorter hold, capture fast moves
 MICRO_STOP_PCT = 0.01                # Was 0.003 — 1% stop survives noise on beta=2 stocks
 MICRO_TARGET_PCT = 0.02              # Was 0.006 — 2% target keeps 2:1 R/R
-MICRO_MAX_TRADES_PER_EVENT = 2       # Was 3 — fewer, higher-conviction trades
+MICRO_MAX_TRADES_PER_EVENT = 4       # Increased from 2 — capture more momentum on confirmed events
 MICRO_MAX_DAILY_GAIN_DISABLE = 0.015
 MICRO_TOP_BETA_STOCKS = 5
 MICRO_EVENT_COOLDOWN_SEC = 900    # 15-min cooldown between events
@@ -230,14 +232,61 @@ MICRO_BETA_TABLE = {
 
 # --- Post-Earnings Announcement Drift ---
 PEAD_ENABLED = True
-PEAD_MIN_SURPRISE_PCT = 5.0
-PEAD_MIN_VOLUME_RATIO = 2.0
+PEAD_MIN_SURPRISE_PCT = 3.0        # Lowered from 5.0 — capture more earnings plays
+PEAD_MIN_VOLUME_RATIO = 2.0       # Tightened from 1.5 — require strong volume confirmation
 PEAD_HOLD_DAYS_MIN = 10
-PEAD_HOLD_DAYS_MAX = 20
+PEAD_HOLD_DAYS_MAX = 5             # Shortened from 20 — most drift happens in first 5 days
 PEAD_TAKE_PROFIT = 0.05
-PEAD_STOP_LOSS = 0.03
+PEAD_STOP_LOSS = 0.02              # Tightened from 3% to 2% — cut losses faster
 PEAD_MAX_POSITIONS = 5
 PEAD_POSITION_SIZE_PCT = 0.02
+
+# --- T5-001: PEAD Pre-Earnings Implied-Move Exploitation ---
+PEAD_PRE_EARNINGS_ENABLED = os.getenv("PEAD_PRE_EARNINGS_ENABLED", "true") == "true"
+PEAD_IMPLIED_MOVE_RATIO_THRESHOLD = 1.5   # realized > 1.5x implied to qualify
+PEAD_PRE_ENTRY_DAYS = 2                   # enter 2 days before earnings
+PEAD_POST_EXIT_DAYS = 2                   # exit within 2 days post-earnings
+PEAD_PRE_SIZE_FRACTION = 0.50             # 50% of normal position size
+PEAD_PRE_ATR_STOP_MULT = 1.5             # 1.5x ATR stop
+
+# --- T5-002: Intraday Regime Switching (HMM) ---
+INTRADAY_REGIME_ENABLED = os.getenv("INTRADAY_REGIME_ENABLED", "true") == "true"
+INTRADAY_REGIME_UPDATE_MIN = 5            # update every 5 minutes
+INTRADAY_REGIME_STATES = 3               # Trending Up, Trending Down, Mean-Reverting
+
+# --- T5-003: ML Ensemble Upgrade ---
+ML_ENSEMBLE_ENABLED = os.getenv("ML_ENSEMBLE_ENABLED", "true") == "true"
+ML_BAYESIAN_OPTIM_TRIALS = 50            # Optuna trials for hyperparameter search
+
+# --- T5-004: NLP Sentiment (FinBERT) ---
+NLP_SENTIMENT_ENABLED = os.getenv("NLP_SENTIMENT_ENABLED", "true") == "true"
+
+# --- T5-005: Options Skew Signal ---
+OPTIONS_SKEW_ENABLED = os.getenv("OPTIONS_SKEW_ENABLED", "true") == "true"
+SKEW_ROLLING_WINDOW = 90                 # 90-day rolling mean for z-score
+SKEW_BULLISH_THRESHOLD = -1.5            # z < -1.5 -> bullish
+SKEW_BEARISH_THRESHOLD = 1.5             # z > 1.5 -> bearish
+SKEW_MAX_BOOST = 0.40                    # max +/-40% confidence adjustment
+
+# --- T5-006: Dark Pool Volume Detection ---
+DARK_POOL_ENABLED = os.getenv("DARK_POOL_ENABLED", "true") == "true"
+DARK_POOL_ROLLING_MINUTES = 30           # rolling window
+DARK_POOL_RATIO_THRESHOLD = 0.35         # 35% dark pool ratio
+DARK_POOL_ALPHA_WEIGHT = 0.15            # confidence multiplier weight
+
+# --- T5-008: PDT Protection ---
+PDT_PROTECTION_ENABLED = os.getenv("PDT_PROTECTION_ENABLED", "true") == "true"
+
+# --- V12 14.4: Alternative Data Sources (Free) ---
+EDGAR_MONITOR_ENABLED = os.getenv("EDGAR_MONITOR_ENABLED", "true") == "true"
+MACRO_SURPRISE_ENABLED = os.getenv("MACRO_SURPRISE_ENABLED", "true") == "true"
+SHORT_INTEREST_ENABLED = os.getenv("SHORT_INTEREST_ENABLED", "false") == "true"  # requires API key
+
+# --- V12 BONUS: Profit Maximization ---
+INTRADAY_VOL_REGIME_ENABLED = os.getenv("INTRADAY_VOL_REGIME_ENABLED", "true") == "true"
+WIN_STREAK_SIZING_ENABLED = os.getenv("WIN_STREAK_SIZING_ENABLED", "true") == "true"
+CONVICTION_PYRAMIDING_ENABLED = os.getenv("CONVICTION_PYRAMIDING_ENABLED", "false") == "true"
+DYNAMIC_STOP_TIGHTENING_ENABLED = os.getenv("DYNAMIC_STOP_TIGHTENING_ENABLED", "true") == "true"
 
 # ============================================================
 # RISK MANAGEMENT
@@ -254,12 +303,12 @@ PDT_ENFORCEMENT_ENABLED = os.getenv("PDT_ENFORCEMENT", "true") == "true"
 PDT_EQUITY_THRESHOLD = 25_000.0
 
 # --- Position Sizing ---
-RISK_PER_TRADE_PCT = 0.008          # Risk 0.8% of portfolio per trade
-MAX_POSITION_PCT = 0.08             # Hard cap: max 8% per position
+RISK_PER_TRADE_PCT = 0.005          # Risk 0.5% of portfolio per trade (was 0.8% — tighter)
+MAX_POSITION_PCT = 0.05             # Hard cap: max 5% per position (was 8% — tighter)
 MIN_POSITION_VALUE = 100            # Min $100 per trade
 MAX_POSITIONS = 12
 MAX_PORTFOLIO_DEPLOY = 0.55
-DAILY_LOSS_HALT = -0.04
+DAILY_LOSS_HALT = -0.025
 
 # --- Volatility Targeting ---
 VOL_TARGET_DAILY = 0.01
@@ -275,6 +324,9 @@ KELLY_FRACTION_MULT = 0.5          # Half-Kelly
 KELLY_MIN_RISK = 0.003
 KELLY_MAX_RISK = 0.02
 
+# --- T7-004: Bayesian Kelly Sizing ---
+BAYESIAN_KELLY_ENABLED = True           # V11.4: Enable regime-weighted Kelly fractions
+
 # --- Daily P&L Controls ---
 PNL_GAIN_LOCK_PCT = 0.015
 PNL_LOSS_HALT_PCT = -0.010
@@ -283,7 +335,7 @@ PNL_GAIN_LOCK_SIZE_MULT = 0.70
 # --- VIX Scaling ---
 VIX_RISK_SCALING_ENABLED = True
 VIX_HALT_THRESHOLD = 40            # Halt all new positions above VIX 40
-VIX_CACHE_SECONDS = 30             # BUG-023: Reduced from 300s to 30s for faster crisis response
+VIX_CACHE_SECONDS = 300            # Cache VIX value for 5 minutes
 
 # --- Beta Neutralization ---
 BETA_MAX_ABS = 0.3
@@ -309,12 +361,28 @@ CLUSTER_CORRELATION_THRESHOLD = 0.70
 CLUSTER_MAX_HEAT = 0.20
 HEAT_CORRELATION_LOOKBACK = 20     # trading days
 CORRELATION_THRESHOLD = 0.92       # Skip if correlated > 92% with open position
+MAX_PAIRWISE_CORRELATION = 0.70    # MED-035: Correlation limiter pairwise cap
+MIN_EFFECTIVE_BETS = 2.0           # MED-035: Minimum effective independent bets
+MAX_SECTOR_WEIGHT = 0.50           # MED-035: Max sector concentration weight
+MAX_SECTOR_EXPOSURE = 0.30         # V12 6.2: Max sector weight as fraction of portfolio (30%)
+MAX_ACCEPTABLE_DRAWDOWN = 0.08     # V12 6.3: Drawdown-based sizing denominator (8%)
+API_FAILURE_CIRCUIT_BREAKER_COUNT = 5   # V12 6.4: Consecutive failures to trigger kill switch
+API_FAILURE_CIRCUIT_BREAKER_WINDOW = 300  # V12 6.4: Window in seconds (5 minutes)
+
+# --- Re-entry Cooldown ---
+REENTRY_COOLDOWN_MIN = 30          # Block re-entry for 30 min after stop-loss (was 15 — too short)
+
+# --- Per-Symbol Daily Loss Cap ---
+MAX_SYMBOL_DAILY_LOSS = 200.0      # Max $200 loss per symbol per day
 
 # --- Short Selling ---
 SHORT_SIZE_MULTIPLIER = 0.75       # Short positions = 75% of equivalent long size
 SHORT_HARD_STOP_PCT = 0.04         # Close short if goes against you > 4%
 MOMENTUM_TRAILING_STOP_PCT = 0.02  # Trailing stop for position monitor
 NO_SHORT_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA"}
+
+# V11.3: Symbols excluded from broker sync re-adoption (e.g., hedge positions)
+BROKER_SYNC_EXCLUDE_SYMBOLS = {"SPY"}
 
 # --- Dynamic Capital Allocation ---
 DYNAMIC_ALLOCATION = os.getenv("DYNAMIC_ALLOCATION", "true") == "true"
@@ -374,9 +442,28 @@ ATR_TRAIL_ACTIVATION = 0.5        # Activate after 0.5x ATR in profit
 EXECUTION_ANALYTICS_ENABLED = True
 EXECUTION_SLIPPAGE_ALERT_PCT = 0.001
 
+# --- T7-001: RL Execution Agent ---
+RL_EXECUTION_ENABLED = False            # Enable deep RL execution agent
+
+# --- T7-003: EDGAR 8-K Monitor ---
+EDGAR_MONITOR_ENABLED = False           # Enable real-time 8-K filing monitor
+
+# --- T7-005: Black-Litterman Portfolio Optimization ---
+BLACK_LITTERMAN_ENABLED = True          # V11.4: Enable BL portfolio-level optimization
+
+# --- Kill Switch ---
+KILL_SWITCH_BATCH_SIZE = 5         # MED-031: Positions to close per batch
+KILL_SWITCH_BATCH_DELAY_SEC = 0.5  # MED-031: Delay between batches (seconds)
+
+# --- Transaction Cost Model ---
+COST_SPREAD_BPS = 1.0              # MED-035: Default spread cost (basis points)
+COST_SLIPPAGE_BPS = 0.5            # MED-035: Default slippage cost (basis points)
+COST_COMMISSION_PER_SHARE = 0.0035 # MED-035: Commission per share
+COST_MIN_EXPECTED_RETURN_BPS = 5.0 # MED-035: Minimum expected return to justify trade
+
 # --- Scan Configuration ---
 SCAN_INTERVAL_SEC = 120
-CLOSE_UNKNOWN_POSITIONS = False    # Auto-close broker positions we didn't open
+# MED-030: Removed CLOSE_UNKNOWN_POSITIONS (dead code, never referenced)
 
 # --- Overnight Holds ---
 OVERNIGHT_HOLD_ENABLED = True
@@ -496,6 +583,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # --- Web Dashboard ---
 WEB_DASHBOARD_ENABLED = os.getenv("WEB_DASHBOARD_ENABLED", "true") == "true"
 WEB_DASHBOARD_PORT = int(os.getenv("WEB_DASHBOARD_PORT", "8080"))
+CORS_ORIGINS = ["http://localhost:3000"]
+TRUSTED_PROXY_IPS: list[str] = []  # MED-034: IPs allowed to set X-Forwarded-For
 
 # --- WebSocket Position Monitoring ---
 WEBSOCKET_MONITORING = True
@@ -518,6 +607,10 @@ DB_FILE = "bot.db"
 LOG_FILE = "bot.log"
 AUDIT_LOG_FILE = "audit.log"
 STATE_SAVE_INTERVAL_SEC = 60
+
+# T4-004: Connection pool tuning — increased from 3 to 10 for market hours throughput
+DB_POOL_SIZE = 10
+DB_POOL_TIMEOUT = 5.0   # seconds to wait for a connection before overflow
 
 # --- Watchdog & Reconciliation ---
 WATCHDOG_ENABLED = True

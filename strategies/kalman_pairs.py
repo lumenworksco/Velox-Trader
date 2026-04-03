@@ -39,6 +39,9 @@ class KalmanPairsTrader:
         self.active_pairs: list[dict] = []  # [{symbol1, symbol2, hedge_ratio, ...}]
         self.kalman_state: dict[str, dict] = {}  # "SYM1_SYM2" -> {theta, P, spread_mean, spread_std}
         self._pairs_ready = False
+        # V12 2.6: Track consecutive data-fetch failures per pair for halt detection
+        self._pair_fetch_failures: dict[str, int] = {}  # pair_id -> consecutive failure count
+        self._HALT_FAILURE_THRESHOLD = 3  # Close pair after this many consecutive failures
 
     def reset_daily(self):
         """Don't clear pairs — they persist for up to a week."""
@@ -393,6 +396,23 @@ class KalmanPairsTrader:
         if np.any(eigvals < 0):
             P += np.eye(P.shape[0]) * (abs(min(eigvals)) + 1e-8)
 
+        # V12 2.7: P matrix regularization — if condition number explodes
+        # (spread near zero for extended periods), Kalman gain diverges.
+        # Reset P to identity * initial_variance to restore numerical stability.
+        try:
+            cond = np.linalg.cond(P)
+            if cond > 1e6:
+                logger.warning(
+                    f"V12 2.7: P matrix ill-conditioned for {pair_key} "
+                    f"(cond={cond:.2e}), resetting to identity"
+                )
+                P = np.eye(2) * 1.0
+        except np.linalg.LinAlgError:
+            logger.warning(
+                f"V12 2.7: P matrix singular for {pair_key}, resetting to identity"
+            )
+            P = np.eye(2) * 1.0
+
         # BUG-014: Assert dimensions after Kalman update to catch corruption early
         assert theta.shape == (2,), (
             f"Kalman theta dimension mismatch for {pair_key}: "
@@ -567,7 +587,41 @@ class KalmanPairsTrader:
                 bars2 = get_intraday_bars(sym2, TimeFrame(2, TimeFrameUnit.Minute), start=lookback, end=now)
 
                 if bars1 is None or bars2 is None or bars1.empty or bars2.empty:
+                    # V12 2.6: Track consecutive data-fetch failures per pair.
+                    # If one leg is halted, we can't get price data. After
+                    # _HALT_FAILURE_THRESHOLD consecutive failures, close the
+                    # entire pair with market orders to avoid sitting unhedged.
+                    self._pair_fetch_failures[trade.pair_id] = (
+                        self._pair_fetch_failures.get(trade.pair_id, 0) + 1
+                    )
+                    consec = self._pair_fetch_failures[trade.pair_id]
+                    leg1_ok = bars1 is not None and not bars1.empty
+                    leg2_ok = bars2 is not None and not bars2.empty
+                    failed_leg = sym1 if not leg1_ok else sym2
+                    logger.warning(
+                        f"V12 2.6: Pair {trade.pair_id} data fetch failure "
+                        f"({consec}/{self._HALT_FAILURE_THRESHOLD}) — "
+                        f"{failed_leg} data unavailable (possible halt)"
+                    )
+                    if consec >= self._HALT_FAILURE_THRESHOLD:
+                        logger.warning(
+                            f"V12 2.6: EMERGENCY CLOSE pair {trade.pair_id} — "
+                            f"{failed_leg} halted for {consec} consecutive cycles"
+                        )
+                        # Close ALL legs of this pair
+                        for s, t in open_trades.items():
+                            if t.pair_id == trade.pair_id:
+                                exits.append({
+                                    "symbol": s,
+                                    "action": "full",
+                                    "reason": f"Pairs leg halted ({failed_leg} data unavail {consec}x)",
+                                    "pair_id": trade.pair_id,
+                                })
+                        self._pair_fetch_failures.pop(trade.pair_id, None)
                     continue
+
+                # V12 2.6: Reset failure counter on successful data fetch
+                self._pair_fetch_failures.pop(trade.pair_id, None)
 
                 price1 = bars1["close"].iloc[-1]
                 price2 = bars2["close"].iloc[-1]

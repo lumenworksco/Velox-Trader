@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import config
 import database
 from data import get_positions, get_account, get_snapshot, get_filled_exit_info
+from execution.core import get_order_commission
 from risk import RiskManager, TradeRecord
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,10 @@ def sync_positions_with_broker(risk: RiskManager, now: datetime, ws_monitor=None
                         f"Real exit price unknown. Manual reconciliation needed."
                     )
 
-            risk.close_trade(symbol, exit_price, now, exit_reason=broker_reason)
+            # V12 6.1: Capture commission from the order
+            commission = get_order_commission(trade.order_id)
+
+            risk.close_trade(symbol, exit_price, now, exit_reason=broker_reason, commission=commission)
             logger.info(f"Position {symbol} confirmed gone from broker — {broker_reason} at ${exit_price:.2f} (entry ${trade.entry_price:.2f})")
             with _broker_miss_lock:
                 _broker_miss_counts.pop(symbol, None)
@@ -263,3 +267,215 @@ def check_shadow_exits(now: datetime):
                 )
         except Exception as e:
             logger.warning(f"Shadow exit check failed for {shadow.get('symbol', '?')}: {e}")
+
+
+def recover_positions(risk: RiskManager, now: datetime) -> dict:
+    """V12 6.5: Startup position recovery — reconcile broker vs DB immediately.
+
+    Unlike sync_positions_with_broker() (which uses 2-miss tolerance for transient
+    API issues during live trading), this function runs ONCE at startup and treats
+    any discrepancy as authoritative: if the broker doesn't have a position, it's
+    gone; if the broker has a position we don't track, adopt it immediately.
+
+    Returns a summary dict: {"adopted": [...], "orphaned": [...], "matched": [...]}.
+    """
+    summary = {"adopted": [], "orphaned": [], "matched": []}
+
+    try:
+        broker_positions = {p.symbol: p for p in get_positions()}
+    except Exception as e:
+        logger.error(f"V12-6.5: Failed to fetch broker positions for recovery: {e}")
+        return summary
+
+    broker_symbols = set(broker_positions.keys())
+    db_symbols = set(risk.open_trades.keys())
+    exclude = getattr(config, "BROKER_SYNC_EXCLUDE_SYMBOLS", {"SPY"})
+
+    # --- Matched positions (broker + DB agree) ---
+    matched = broker_symbols & db_symbols
+    for symbol in matched:
+        bp = broker_positions[symbol]
+        trade = risk.open_trades[symbol]
+        broker_qty = abs(int(float(bp.qty)))
+        broker_avg = float(bp.avg_entry_price)
+        # Log price drift for visibility
+        price_drift = abs(trade.entry_price - broker_avg)
+        if price_drift > 0.01:
+            logger.info(
+                f"V12-6.5: {symbol} matched — DB entry=${trade.entry_price:.2f} "
+                f"vs broker avg=${broker_avg:.2f} (drift=${price_drift:.2f})"
+            )
+        summary["matched"].append(symbol)
+
+    # --- Orphaned positions (in DB but NOT at broker → close immediately) ---
+    orphaned = db_symbols - broker_symbols
+    for symbol in orphaned:
+        trade = risk.open_trades[symbol]
+
+        # Try to get a real exit price from recent fills
+        exit_price = None
+        broker_reason = "orphan_recovery"
+        try:
+            exit_price, fill_reason = get_filled_exit_info(symbol, side=trade.side)
+            if exit_price is not None and fill_reason:
+                broker_reason = f"orphan_recovery/{fill_reason}"
+        except Exception:
+            pass
+
+        # Fallback: use snapshot price, then entry price
+        if exit_price is None:
+            try:
+                snap = get_snapshot(symbol)
+                if snap and snap.latest_trade:
+                    exit_price = float(snap.latest_trade.price)
+                    broker_reason = "orphan_recovery/snapshot"
+            except Exception:
+                pass
+        if exit_price is None:
+            exit_price = trade.entry_price
+            broker_reason = "orphan_recovery/entry_fallback"
+            logger.warning(
+                f"V12-6.5: Using entry price as exit for orphaned {symbol} — "
+                f"manual reconciliation recommended"
+            )
+
+        risk.close_trade(symbol, exit_price, now, exit_reason=broker_reason)
+        logger.warning(
+            f"V12-6.5 ORPHANED: {symbol} was in DB but not at broker — "
+            f"closed at ${exit_price:.2f} (reason={broker_reason}, "
+            f"entry=${trade.entry_price:.2f}, qty={trade.qty}, strategy={trade.strategy})"
+        )
+        summary["orphaned"].append({
+            "symbol": symbol,
+            "strategy": trade.strategy,
+            "side": trade.side,
+            "entry_price": trade.entry_price,
+            "exit_price": exit_price,
+            "qty": trade.qty,
+            "reason": broker_reason,
+        })
+
+    # --- Adopted positions (at broker but NOT in DB → create TradeRecord) ---
+    adopted = broker_symbols - db_symbols
+    for symbol in adopted:
+        if symbol in exclude:
+            logger.info(f"V12-6.5: Skipping excluded symbol {symbol} (hedge/manual)")
+            continue
+
+        bp = broker_positions[symbol]
+        qty = int(float(bp.qty))
+        avg_price = float(bp.avg_entry_price)
+        side = "buy" if qty > 0 else "sell"
+
+        # Try to find original strategy from recent DB history
+        recent = database.get_recent_trades(days=3)
+        recent_match = next(
+            (t for t in recent if t["symbol"] == symbol),
+            None,
+        )
+        original_strategy = recent_match["strategy"] if recent_match else "adopted"
+
+        # Compute TP/SL using ATR (fall back to 2% of price)
+        atr_val = avg_price * 0.02
+        try:
+            from data import get_intraday_bars
+            from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+            bars = get_intraday_bars(
+                symbol, TimeFrame(5, TimeFrameUnit.Minute),
+                start=now - timedelta(hours=2), end=now,
+            )
+            if bars is not None and len(bars) >= 10:
+                import pandas_ta as pta
+                atr = pta.atr(bars["high"], bars["low"], bars["close"], length=10)
+                if atr is not None and len(atr) > 0:
+                    atr_val = float(atr.iloc[-1])
+                else:
+                    logger.warning(
+                        f"V12-6.5: ATR unavailable for adopted {symbol} — using 2% default"
+                    )
+            else:
+                logger.warning(
+                    f"V12-6.5: Insufficient bars for ATR on adopted {symbol} — using 2% default"
+                )
+        except Exception as e:
+            logger.warning(f"V12-6.5: ATR calc failed for adopted {symbol}: {e} — using 2% default")
+
+        tp_mult, sl_mult = 2.0, 1.5
+        if side == "buy":
+            take_profit = avg_price + (atr_val * tp_mult)
+            stop_loss = avg_price - (atr_val * sl_mult)
+        else:
+            take_profit = avg_price - (atr_val * tp_mult)
+            stop_loss = avg_price + (atr_val * sl_mult)
+
+        trade = TradeRecord(
+            symbol=symbol,
+            strategy=original_strategy,
+            side=side,
+            entry_price=avg_price,
+            entry_time=now,
+            qty=abs(qty),
+            take_profit=round(take_profit, 2),
+            stop_loss=round(stop_loss, 2),
+            order_id="",
+            hold_type="day",
+            entry_atr=atr_val,
+        )
+        risk.register_trade(trade)
+        logger.warning(
+            f"V12-6.5 ADOPTED: {symbol} {side} qty={abs(qty)} @ ${avg_price:.2f} "
+            f"(strategy={original_strategy}, TP=${take_profit:.2f}, SL=${stop_loss:.2f})"
+        )
+        summary["adopted"].append({
+            "symbol": symbol,
+            "strategy": original_strategy,
+            "side": side,
+            "entry_price": avg_price,
+            "qty": abs(qty),
+            "take_profit": round(take_profit, 2),
+            "stop_loss": round(stop_loss, 2),
+        })
+
+    # --- Send Telegram alert if any discrepancies found ---
+    if summary["adopted"] or summary["orphaned"]:
+        _send_recovery_alert(summary)
+
+    # --- Summary log ---
+    logger.info(
+        f"V12-6.5 Recovery complete: {len(summary['matched'])} matched, "
+        f"{len(summary['adopted'])} adopted, {len(summary['orphaned'])} orphaned"
+    )
+
+    return summary
+
+
+def _send_recovery_alert(summary: dict):
+    """Send a Telegram notification summarizing startup position recovery."""
+    notif = _get_notifications()
+    if not notif:
+        return
+
+    lines = ["*V12-6.5 Startup Position Recovery*\n"]
+
+    if summary["adopted"]:
+        lines.append(f"*Adopted ({len(summary['adopted'])})* — at broker, missing from DB:")
+        for a in summary["adopted"]:
+            lines.append(
+                f"  {a['side'].upper()} {a['qty']} {a['symbol']} "
+                f"@ ${a['entry_price']:.2f} ({a['strategy']})"
+            )
+
+    if summary["orphaned"]:
+        lines.append(f"\n*Orphaned ({len(summary['orphaned'])})* — in DB, missing from broker:")
+        for o in summary["orphaned"]:
+            lines.append(
+                f"  {o['side'].upper()} {o['qty']} {o['symbol']} "
+                f"@ ${o['entry_price']:.2f} → closed @ ${o['exit_price']:.2f} ({o['reason']})"
+            )
+
+    lines.append(f"\n_Matched: {len(summary.get('matched', []))} positions OK_")
+
+    try:
+        notif._send_telegram("\n".join(lines))
+    except Exception as e:
+        logger.warning(f"V12-6.5: Failed to send recovery Telegram alert: {e}")

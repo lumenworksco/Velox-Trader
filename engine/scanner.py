@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from engine.failure_modes import FailureMode, handle_failure
+from risk.risk_manager import is_strategy_in_time_window
 
 import pandas as pd
 from alpaca.data.timeframe import TimeFrame
@@ -117,6 +118,12 @@ class StrategyRegistry:
         extra_kwargs = extra_kwargs or {}
 
         for name, entry in self._strategies.items():
+            # V12 4.2: Skip strategies outside their optimal time window
+            if not is_strategy_in_time_window(name, current):
+                logger.debug("V12 4.2: %s skipped — outside time window at %s", name, current.time())
+                counts[name] = 0
+                continue
+
             strategy = entry["instance"]
             try:
                 # Build scan kwargs
@@ -277,46 +284,62 @@ def scan_all_strategies(
     except Exception as e:
         logger.error(f"Micro event detection failed: {e}")
 
-    # Scan each strategy
-    try:
-        mr_signals = stat_mr.scan(current, regime)
-        signals.extend(mr_signals)
-    except Exception as e:
-        logger.error(f"StatMR scan failed: {e}")
+    # Scan each strategy (V12 4.2: skip if outside optimal time window)
+    if is_strategy_in_time_window("STAT_MR", current):
+        try:
+            mr_signals = stat_mr.scan(current, regime)
+            signals.extend(mr_signals)
+        except Exception as e:
+            logger.error(f"StatMR scan failed: {e}")
+    else:
+        logger.debug("V12 4.2: STAT_MR skipped — outside time window at %s", current.time())
 
-    try:
-        vwap_signals = vwap_strategy.scan(current, regime)
-        signals.extend(vwap_signals)
-    except Exception as e:
-        logger.error(f"VWAP scan failed: {e}")
+    if is_strategy_in_time_window("VWAP", current):
+        try:
+            vwap_signals = vwap_strategy.scan(current, regime)
+            signals.extend(vwap_signals)
+        except Exception as e:
+            logger.error(f"VWAP scan failed: {e}")
+    else:
+        logger.debug("V12 4.2: VWAP skipped — outside time window at %s", current.time())
 
-    try:
-        pair_signals = kalman_pairs.scan(current, regime)
-        signals.extend(pair_signals)
-    except Exception as e:
-        logger.error(f"KalmanPairs scan failed: {e}")
+    if is_strategy_in_time_window("KALMAN_PAIRS", current):
+        try:
+            pair_signals = kalman_pairs.scan(current, regime)
+            signals.extend(pair_signals)
+        except Exception as e:
+            logger.error(f"KalmanPairs scan failed: {e}")
+    else:
+        logger.debug("V12 4.2: KALMAN_PAIRS skipped — outside time window at %s", current.time())
 
-    if orb_strategy:
+    if orb_strategy and is_strategy_in_time_window("ORB", current):
         try:
             orb_signals = orb_strategy.scan(current, regime)
             signals.extend(orb_signals)
         except Exception as e:
             logger.error(f"ORB scan failed: {e}")
+    elif orb_strategy:
+        logger.debug("V12 4.2: ORB skipped — outside time window at %s", current.time())
 
-    try:
-        micro_signals = micro_mom.scan(
-            current, day_pnl_pct=day_pnl_pct, regime=regime
-        )
-        signals.extend(micro_signals)
-    except Exception as e:
-        logger.error(f"MicroMom scan failed: {e}")
+    if is_strategy_in_time_window("MICRO_MOM", current):
+        try:
+            micro_signals = micro_mom.scan(
+                current, day_pnl_pct=day_pnl_pct, regime=regime
+            )
+            signals.extend(micro_signals)
+        except Exception as e:
+            logger.error(f"MicroMom scan failed: {e}")
+    else:
+        logger.debug("V12 4.2: MICRO_MOM skipped — outside time window at %s", current.time())
 
-    if pead_strategy:
+    if pead_strategy and is_strategy_in_time_window("PEAD", current):
         try:
             pead_signals = pead_strategy.scan(current)
             signals.extend(pead_signals)
         except Exception as e:
             logger.error(f"PEAD scan failed: {e}")
+    elif pead_strategy:
+        logger.debug("V12 4.2: PEAD skipped — outside time window at %s", current.time())
 
     # --- New V10 strategies ---
     copula_signals = []

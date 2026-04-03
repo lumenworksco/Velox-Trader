@@ -183,6 +183,33 @@ class TieredCircuitBreaker:
         """Whether ALL positions should be closed (kill switch)."""
         return self.config.close_all
 
+    def escalate_to(self, tier: CircuitTier, reason: str = "") -> CircuitTier:
+        """Force-escalate to *at least* the given tier (thread-safe).
+
+        If the breaker is already at an equal or higher tier, this is a no-op.
+        De-escalation is never performed — use ``update()`` for that.
+
+        Args:
+            tier: Minimum tier to escalate to.
+            reason: Human-readable reason for the escalation.
+
+        Returns:
+            The resulting current tier.
+        """
+        with self._lock:
+            if tier <= self.current_tier:
+                return self.current_tier
+            old = self.current_tier
+            now = datetime.now(config.ET)
+            self.current_tier = tier
+            self.tier_history.append((now, tier))
+            self.last_update = now
+            logger.warning(
+                "Circuit breaker ESCALATED (external): %s -> %s (%s)",
+                old.name, tier.name, reason,
+            )
+            return self.current_tier
+
     def reset_daily(self):
         """Reset at start of new trading day (thread-safe)."""
         with self._lock:

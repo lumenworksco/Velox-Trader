@@ -1,5 +1,6 @@
 """Alpaca data fetching — bars, account info, market status."""
 
+import functools
 import logging
 import random
 import threading
@@ -133,6 +134,89 @@ def get_trading_rate_limiter() -> AlpacaRateLimiter:
     return _trading_limiter
 
 
+# =============================================================================
+# V12-5.2: Retry decorator for transient server errors
+# =============================================================================
+
+# HTTP status codes and exception substrings that indicate a retryable server error
+_RETRYABLE_STATUS_CODES = {500, 502, 503}
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Return True if the exception represents a retryable server/timeout error.
+
+    Retries on HTTP 500/502/503 and timeouts. Does NOT retry on 4xx client errors.
+    """
+    exc_str = str(exc).lower()
+    # Timeout errors (requests, httpx, urllib3, generic)
+    timeout_keywords = ("timeout", "timed out", "connecttimeout", "readtimeout")
+    if any(kw in exc_str for kw in timeout_keywords):
+        return True
+    # Check for retryable HTTP status codes in the exception
+    for code in _RETRYABLE_STATUS_CODES:
+        if str(code) in exc_str:
+            return True
+    # alpaca-py wraps HTTP errors — check for status_code attribute
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status and int(status) in _RETRYABLE_STATUS_CODES:
+        return True
+    return False
+
+
+def retry_on_server_error(max_retries: int = 3, base_delay: float = 1.0):
+    """V12-5.2: Decorator that retries a function on transient server errors.
+
+    Uses exponential backoff (1s, 2s, 4s) and only retries on HTTP 500/502/503
+    or timeout errors. Client errors (4xx) are raised immediately.
+
+    Args:
+        max_retries: Maximum number of retry attempts (default 3).
+        base_delay: Base delay in seconds; doubles each attempt (default 1.0).
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if not _is_retryable_error(exc) or attempt == max_retries:
+                        raise
+                    delay = base_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "V12-5.2: %s attempt %d/%d failed (%s), retrying in %.1fs",
+                        func.__name__, attempt, max_retries, exc, delay,
+                    )
+                    _time.sleep(delay)
+            raise last_exc  # unreachable, but satisfies type checkers
+
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            import asyncio
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if not _is_retryable_error(exc) or attempt == max_retries:
+                        raise
+                    delay = base_delay * (2 ** (attempt - 1))
+                    logger.warning(
+                        "V12-5.2: %s attempt %d/%d failed (%s), retrying in %.1fs",
+                        func.__name__, attempt, max_retries, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+            raise last_exc
+
+        import asyncio
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        return wrapper
+    return decorator
+
+
 # --- Clients ---
 _trading_client: TradingClient | None = None
 _data_client: StockHistoricalDataClient | None = None
@@ -159,6 +243,7 @@ def get_data_client() -> StockHistoricalDataClient:
     return _data_client
 
 
+@retry_on_server_error()
 def get_account():
     """Get current account info."""
     _trading_limiter.acquire()  # T2-007: rate limit
@@ -167,6 +252,7 @@ def get_account():
     return result
 
 
+@retry_on_server_error()
 def get_clock():
     """Get market clock (open/close status, next open/close times)."""
     _trading_limiter.acquire()  # T2-007: rate limit
@@ -175,6 +261,7 @@ def get_clock():
     return result
 
 
+@retry_on_server_error()
 def get_positions():
     """Get all open positions from Alpaca."""
     _trading_limiter.acquire()  # T2-007: rate limit
@@ -183,6 +270,7 @@ def get_positions():
     return result
 
 
+@retry_on_server_error()
 def get_open_orders():
     """Get all open orders."""
     _trading_limiter.acquire()  # T2-007: rate limit
@@ -192,6 +280,7 @@ def get_open_orders():
     return result
 
 
+@retry_on_server_error()
 def get_bars(symbol: str, timeframe: TimeFrame, start: datetime, end: datetime | None = None, limit: int | None = None) -> pd.DataFrame:
     """Fetch historical bars for a symbol, return as DataFrame."""
     _data_limiter.acquire()  # T2-007: rate limit
@@ -339,6 +428,7 @@ def get_filled_exit_price(symbol: str, side: str = "buy") -> float | None:
     return price
 
 
+@retry_on_server_error()
 def get_snapshot(symbol: str):
     """Get latest snapshot for a symbol (latest trade, quote, bar)."""
     _data_limiter.acquire()  # T2-007: rate limit
@@ -352,6 +442,7 @@ def get_snapshot(symbol: str):
     return None
 
 
+@retry_on_server_error()
 def get_snapshots(symbols: list[str]) -> dict:
     """Get snapshots for multiple symbols at once."""
     _data_limiter.acquire()  # T2-007: rate limit
@@ -392,6 +483,7 @@ def get_snapshots_batch(symbols: list[str], chunk_size: int = 1000) -> dict:
             # Fallback: fetch individually for this chunk
             for sym in chunk:
                 try:
+                    _data_limiter.acquire()  # V12-5.3: rate limit individual fallback fetches
                     snap = get_snapshot(sym)
                     if snap is not None:
                         all_snapshots[sym] = snap
@@ -461,6 +553,7 @@ def _get_trading_base_url() -> str:
     return _BASE_URL_TRADING_PAPER if config.PAPER_MODE else _BASE_URL_TRADING_LIVE
 
 
+@retry_on_server_error()
 async def get_daily_bars_async(symbol: str, days: int = 30) -> pd.DataFrame:
     """T2-001: Async variant of get_daily_bars using httpx.
 
@@ -507,6 +600,7 @@ async def get_daily_bars_async(symbol: str, days: int = 30) -> pd.DataFrame:
     return df
 
 
+@retry_on_server_error()
 async def get_intraday_bars_async(
     symbol: str, timeframe_str: str = "1Min",
     start: datetime | None = None, end: datetime | None = None,
@@ -560,6 +654,7 @@ async def get_intraday_bars_async(
     return df
 
 
+@retry_on_server_error()
 async def get_snapshot_async(symbol: str) -> dict | None:
     """T2-001: Async variant of get_snapshot using httpx.
 
@@ -578,6 +673,7 @@ async def get_snapshot_async(symbol: str) -> dict | None:
         return resp.json()
 
 
+@retry_on_server_error()
 async def get_account_async() -> dict:
     """T2-001: Async variant of get_account using httpx.
 
