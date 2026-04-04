@@ -1368,6 +1368,18 @@ def submit_bracket_order(signal: Signal, qty: int, order_manager=None) -> str | 
                 )
                 return None
 
+            # V12 FINAL: Start chase thread for limit orders to prevent
+            # unfilled orders sitting at stale prices. Chase will amend
+            # price at 15s, convert to market at 30s, cancel at 45s.
+            if signal.strategy in _LIMIT_ORDER_STRATEGIES:
+                try:
+                    _start_chase_thread(order_id, signal, qty)
+                except Exception as chase_err:
+                    logger.debug(
+                        "V12 FINAL: Chase thread start failed for %s (non-fatal): %s",
+                        signal.symbol, chase_err,
+                    )
+
             return order_id
 
         except Exception as e:

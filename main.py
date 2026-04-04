@@ -1519,25 +1519,39 @@ def main():
                             )
 
                         # 5. Check strategy exits (always runs — uses cached prices if feed down)
-                        # V12 AUDIT: Use ExitOrchestrator as primary exit system
+                        # V12 FINAL: ExitOrchestrator is primary; legacy is fallback
                         if _exit_orchestrator is not None:
                             try:
-                                from risk import get_vix_level as _get_vix_exit
+                                # Build strategies dict for orchestrator
+                                _strat_dict = {
+                                    "STAT_MR": stat_mr,
+                                    "KALMAN_PAIRS": kalman_pairs,
+                                    "MICRO_MOM": micro_mom,
+                                }
+                                if orb_strategy:
+                                    _strat_dict["ORB"] = orb_strategy
+                                if pead_strategy:
+                                    _strat_dict["PEAD"] = pead_strategy
+
                                 exit_actions = _exit_orchestrator.check_exits(
-                                    positions=risk.open_trades,
+                                    risk_manager=risk,
                                     now=current,
-                                    vix_level=_get_vix_exit(),
+                                    strategies=_strat_dict,
+                                    ws_monitor=ws_monitor,
                                 )
                                 if exit_actions:
-                                    for action in exit_actions:
-                                        try:
-                                            handle_strategy_exits([action], risk, current, ws_monitor)
-                                        except Exception as ea:
-                                            logger.error("ExitOrchestrator action failed for %s: %s", getattr(action, 'symbol', '?'), ea)
-                                    logger.info("V12 AUDIT: ExitOrchestrator processed %d exit actions", len(exit_actions))
+                                    _exit_orchestrator.execute_exits(
+                                        exit_actions, risk, current, ws_monitor,
+                                    )
+                                    logger.info(
+                                        "V12 FINAL: ExitOrchestrator processed %d exit actions",
+                                        len(exit_actions),
+                                    )
                             except Exception as oe:
-                                logger.warning("V12 AUDIT: ExitOrchestrator failed, falling back to legacy exits: %s", oe)
-                                # Fallback to legacy
+                                logger.warning(
+                                    "V12 FINAL: ExitOrchestrator failed (%s), "
+                                    "falling back to legacy exits", oe,
+                                )
                                 check_all_exits(
                                     current, risk, stat_mr, kalman_pairs, micro_mom,
                                     orb_strategy, pead_strategy, ws_monitor,
@@ -1550,12 +1564,11 @@ def main():
                                     except Exception as e:
                                         logger.error("Advanced exits failed: %s", e)
                         else:
-                            # No orchestrator available — use legacy exits
+                            # No orchestrator — use legacy exits
                             check_all_exits(
                                 current, risk, stat_mr, kalman_pairs, micro_mom,
                                 orb_strategy, pead_strategy, ws_monitor,
                             )
-                            # 5b. V12: Advanced exits (profit tiers, dead signal, scale-out)
                             if _check_advanced_exits is not None:
                                 try:
                                     adv_exits = _check_advanced_exits(risk, current)
