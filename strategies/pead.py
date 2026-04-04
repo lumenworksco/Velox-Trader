@@ -149,7 +149,7 @@ class PEADStrategy:
             try:
                 # Time stop: max hold days (5), with extension to 10 if profit > 2%
                 if hasattr(trade, "entry_time") and trade.entry_time:
-                    hold_days = (now - trade.entry_time).days
+                    hold_days = (now - trade.entry_time).total_seconds() / 86400.0
                     # Check if trade is profitable enough to extend hold
                     max_hold = config.PEAD_HOLD_DAYS_MAX  # 5 days default
                     try:
@@ -442,7 +442,7 @@ class PEADStrategy:
 
             try:
                 if hasattr(trade, "entry_time") and trade.entry_time:
-                    hold_days = (now - trade.entry_time).days
+                    hold_days = (now - trade.entry_time).total_seconds() / 86400.0
                     # Pre-earnings trades exit faster: entry_days + post_days
                     max_hold = config.PEAD_PRE_ENTRY_DAYS + config.PEAD_POST_EXIT_DAYS
                     if hold_days >= max_hold:

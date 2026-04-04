@@ -64,7 +64,12 @@ def _record_api_failure() -> None:
 
 
 def _record_api_success() -> None:
-    """Reset the API failure counter on successful API call."""
+    """Reset the API failure counter on successful ORDER SUBMISSION.
+
+    V12 FINAL: Only call this after a successful order submission,
+    NOT after other API calls (get_positions, get_account, etc.).
+    The circuit breaker tracks consecutive submission failures only.
+    """
     _api_failures.clear()
 
 

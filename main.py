@@ -926,8 +926,8 @@ def main():
     # V12 2.9: Track VIX values over a rolling 15-minute window for spike detection.
     # Each entry is (timestamp_epoch, vix_value).  Checked every scan cycle.
     _vix_history: collections.deque = collections.deque()
-    VIX_SPIKE_WINDOW_SEC = 15 * 60          # 15 minutes
-    VIX_SPIKE_THRESHOLD_PCT = 0.20          # 20 % rise triggers escalation
+    VIX_SPIKE_WINDOW_SEC = getattr(config, 'VIX_SPIKE_WINDOW_SEC', 15 * 60)
+    VIX_SPIKE_THRESHOLD_PCT = getattr(config, 'VIX_SPIKE_THRESHOLD_PCT', 0.20)
 
     ws_monitor = initialize_websocket(risk)
     initialize_dashboard(order_manager, kill_switch, tiered_cb)
@@ -1342,7 +1342,10 @@ def main():
 
                         # V10: Tiered circuit breaker (replaces single-threshold)
                         skip_scan = False
-                        day_pnl_pct = 0.0  # V12 AUDIT: initialize before conditional block (used unconditionally later)
+                        # V12 FINAL: Initialize to 0.0 as safe default. When tiered_cb is None
+                        # (e.g. during tests or if circuit breaker init fails), strategies receive
+                        # day_pnl_pct=0.0 which is conservative (assumes no P&L movement).
+                        day_pnl_pct = 0.0
                         if tiered_cb:
                             day_pnl_pct = risk.day_pnl / max(risk.current_equity, 1)
                             tier = tiered_cb.update(day_pnl_pct, current)
@@ -1438,13 +1441,14 @@ def main():
                             skip_scan = True
 
                         if skip_scan:
+                            # V12 FINAL: Define tier_name before any conditional block
+                            tier_name = tiered_cb.current_tier.name if tiered_cb else "ACTIVE"
                             if notifications and config.TELEGRAM_ENABLED:
                                 try:
-                                    tier_name = tiered_cb.current_tier.name if tiered_cb else "ACTIVE"
                                     notifications.notify_circuit_breaker(risk.day_pnl)
                                 except Exception as e:
                                     logger.warning(f"Circuit breaker notification failed: {e}")
-                            logger.warning(f"Circuit breaker {tier_name if tiered_cb else 'ACTIVE'} — skipping scan cycle (day P&L: {risk.day_pnl:.2f})")
+                            logger.warning(f"Circuit breaker {tier_name} — skipping scan cycle (day P&L: {risk.day_pnl:.2f})")
                             last_scan = current
                             continue
 
@@ -1547,6 +1551,12 @@ def main():
                                         "V12 FINAL: ExitOrchestrator processed %d exit actions",
                                         len(exit_actions),
                                     )
+                                elif risk.open_trades:
+                                    logger.debug(
+                                        "V12 FINAL: ExitOrchestrator returned 0 actions "
+                                        "(%d open positions checked)",
+                                        len(risk.open_trades),
+                                    )
                             except Exception as oe:
                                 logger.warning(
                                     "V12 FINAL: ExitOrchestrator failed (%s), "
@@ -1593,7 +1603,7 @@ def main():
                                     logger.error(f"Cross-asset update failed: {e}")
 
                         # V12 AUDIT: Recompute correlation matrix every 60 minutes (not just at open)
-                        if (current - last_correlation_refresh).total_seconds() >= 3600:  # Every 60 min
+                        if (current - last_correlation_refresh).total_seconds() >= getattr(config, 'CORRELATION_REFRESH_INTERVAL_SEC', 3600):
                             try:
                                 load_correlation_cache(config.SYMBOLS)
                                 last_correlation_refresh = current
@@ -1634,7 +1644,7 @@ def main():
 
                         # V12 2.5: Corporate action check (every 30 min)
                         if corp_action_detector:
-                            if (current - last_corp_action_check).total_seconds() >= 1800:
+                            if (current - last_corp_action_check).total_seconds() >= getattr(config, 'CORP_ACTION_CHECK_INTERVAL_SEC', 1800):
                                 try:
                                     open_symbols = list(risk.open_trades.keys())
                                     if open_symbols:

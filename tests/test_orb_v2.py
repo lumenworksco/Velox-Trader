@@ -191,7 +191,7 @@ class TestCheckExits:
             side="buy",
         )
 
-        exits = strat.check_exits([trade], now)
+        exits = strat.check_exits({"AAPL": trade}, now)
 
         assert len(exits) == 1
         assert exits[0]["symbol"] == "AAPL"
@@ -212,7 +212,7 @@ class TestCheckExits:
             side="buy",
         )
 
-        exits = strat.check_exits([trade], now)
+        exits = strat.check_exits({"AAPL": trade}, now)
         assert exits == []
 
     def test_check_exits_ignores_non_orb(self):
@@ -229,7 +229,7 @@ class TestCheckExits:
             side="buy",
         )
 
-        exits = strat.check_exits([trade], now)
+        exits = strat.check_exits({"MSFT": trade}, now)
         assert exits == []
 
 

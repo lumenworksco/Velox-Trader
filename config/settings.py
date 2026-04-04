@@ -226,7 +226,7 @@ MICRO_BETA_TABLE = {
     'GOOGL': 1.15, 'AMZN': 1.2, 'AAPL': 1.1, 'MSFT': 1.05,
     'CRWD': 1.3, 'PANW': 1.2, 'ZS': 1.2, 'RBLX': 1.4,
     'CELH': 1.3, 'AXON': 1.2, 'ENPH': 1.5, 'FSLR': 1.4,
-    'IONQ': 2.0, 'RGTI': 2.0, 'QUBT': 2.0, 'RKLB': 1.8,
+    # V12 FINAL: Removed IONQ, RGTI, QUBT, RKLB (dropped from universe)
     'LYFT': 1.5, 'UBER': 1.3, 'ABNB': 1.4, 'DASH': 1.3,
 }
 
@@ -374,6 +374,14 @@ MAX_SECTOR_EXPOSURE = 0.30         # V12 6.2: Max sector weight as fraction of p
 MAX_ACCEPTABLE_DRAWDOWN = 0.08     # V12 6.3: Drawdown-based sizing denominator (8%)
 API_FAILURE_CIRCUIT_BREAKER_COUNT = 5   # V12 6.4: Consecutive failures to trigger kill switch
 API_FAILURE_CIRCUIT_BREAKER_WINDOW = 300  # V12 6.4: Window in seconds (5 minutes)
+
+# V12 FINAL: VIX spike detection for circuit breaker escalation
+VIX_SPIKE_WINDOW_SEC = 900          # 15-minute rolling window
+VIX_SPIKE_THRESHOLD_PCT = 0.20      # 20% VIX rise triggers ORANGE escalation
+
+# V12 FINAL: Periodic refresh intervals
+CORRELATION_REFRESH_INTERVAL_SEC = 3600   # Refresh correlation matrix every 60 min
+CORP_ACTION_CHECK_INTERVAL_SEC = 1800     # Check corporate actions every 30 min
 
 # --- Re-entry Cooldown ---
 REENTRY_COOLDOWN_MIN = 30          # Block re-entry for 30 min after stop-loss (was 15 — too short)

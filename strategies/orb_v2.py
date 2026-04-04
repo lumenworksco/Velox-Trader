@@ -19,6 +19,11 @@ from utils import safe_divide
 
 logger = logging.getLogger(__name__)
 
+try:
+    from earnings import has_earnings_soon as _has_earnings_soon
+except ImportError:
+    _has_earnings_soon = None
+
 # WIRE-004: Order book imbalance confirmation (fail-open)
 _order_book_analyzer = None
 try:
@@ -143,13 +148,13 @@ class ORBStrategyV2:
 
         for symbol, orb in self.opening_ranges.items():
             # V12 AUDIT: Skip symbols with upcoming earnings (gap risk)
-            try:
-                from earnings import has_earnings_soon
-                if has_earnings_soon(symbol, days=2):
-                    logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
-                    continue
-            except Exception:
-                pass  # Fail-open
+            if _has_earnings_soon is not None:
+                try:
+                    if _has_earnings_soon(symbol, days=2):
+                        logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
+                        continue
+                except Exception:
+                    pass  # Fail-open
 
             if not orb.get("valid"):
                 continue
@@ -266,7 +271,7 @@ class ORBStrategyV2:
     # Exit management
     # ------------------------------------------------------------------
 
-    def check_exits(self, open_trades: list, now: datetime) -> list[dict]:
+    def check_exits(self, open_trades: dict, now: datetime) -> list[dict]:
         """Check open ORB trades for trailing stop and time stop.
 
         V11.3 T3: Trailing stop for ORB breakout trades:
@@ -279,11 +284,9 @@ class ORBStrategyV2:
         """
         exits: list[dict] = []
 
-        for trade in open_trades:
+        for symbol, trade in open_trades.items():
             if getattr(trade, "strategy", "") != "ORB":
                 continue
-
-            symbol = trade.symbol
 
             # V11.3 T3: Trailing stop based on ORB range
             orb = self.opening_ranges.get(symbol)

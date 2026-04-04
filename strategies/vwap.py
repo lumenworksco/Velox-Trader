@@ -20,6 +20,11 @@ from strategies.base import Signal, VWAPState
 from analytics.ou_tools import fit_ou_params, compute_zscore
 from analytics.indicators import compute_vwap_bands
 
+try:
+    from earnings import has_earnings_soon as _has_earnings_soon
+except ImportError:
+    _has_earnings_soon = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,13 +51,13 @@ class VWAPStrategy:
 
         for symbol in scan_symbols:
             # V12 AUDIT: Skip symbols with upcoming earnings (gap risk)
-            try:
-                from earnings import has_earnings_soon
-                if has_earnings_soon(symbol, days=2):
-                    logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
-                    continue
-            except Exception:
-                pass  # Fail-open
+            if _has_earnings_soon is not None:
+                try:
+                    if _has_earnings_soon(symbol, days=2):
+                        logger.debug("V12 AUDIT: %s has earnings within 2 days — skipping", symbol)
+                        continue
+                except Exception:
+                    pass  # Fail-open
 
             # Cooldown: don't re-trigger within 5 minutes
             if symbol in self.triggered:
@@ -238,7 +243,7 @@ class VWAPStrategy:
 
         return signals
 
-    def check_exits(self, open_trades: list, now: datetime) -> list[dict]:
+    def check_exits(self, open_trades: dict, now: datetime) -> list[dict]:
         """Check VWAP positions for exit signals.
 
         VWAP exits are handled entirely by ExitManager (time stops, trailing

@@ -814,19 +814,24 @@ def process_signals(
             database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "intra_scan_limit")
             continue
 
-        # V12 AUDIT: Enforce data quality gate on signal bars
+        # V12 FINAL: Data quality gate — fetch recent bars and validate
         try:
             from data.quality import get_quality_framework
+            from data import get_bars as _dq_get_bars
             dqf = get_quality_framework()
-            bars = getattr(signal, '_bars', None)  # If bars attached to signal
-            if bars is not None and len(bars) > 0:
-                quality_score = dqf.check(bars)
+            # Fetch last 10 bars for the signal symbol
+            _dq_bars = _dq_get_bars(signal.symbol, timeframe="1Min", limit=10)
+            if _dq_bars is not None and len(_dq_bars) >= 3:
+                quality_score = dqf.check(_dq_bars)
                 if not quality_score.is_tradeable:
-                    logger.info("V12 AUDIT: %s data quality too low (%.2f) — rejecting signal", signal.symbol, quality_score.overall)
+                    logger.info(
+                        "V12 FINAL: %s data quality too low (%.2f) — rejecting signal",
+                        signal.symbol, quality_score.overall,
+                    )
                     database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, "data_quality_gate")
                     continue
         except Exception:
-            pass  # Fail-open
+            pass  # Fail-open: allow signal if quality check fails
 
         prev_open = set(risk.open_trades.keys())
         _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor,

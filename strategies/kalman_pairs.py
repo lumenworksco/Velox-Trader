@@ -369,6 +369,12 @@ class KalmanPairsTrader:
         y_hat = x @ theta
         e = y - y_hat  # Spread (innovation)
 
+        # V12 FINAL: Check P condition BEFORE gain computation to prevent K divergence
+        initial_variance = 1.0
+        if np.linalg.cond(P) > 1e6:
+            P = np.eye(2) * initial_variance
+            logger.warning("V12 FINAL: P matrix pre-update reset for %s (cond > 1e6)", pair_key)
+
         # Innovation covariance
         R = config.KALMAN_OBS_NOISE  # Observation noise
         S = x @ P @ x.T + R
