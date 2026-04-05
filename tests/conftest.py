@@ -338,3 +338,23 @@ def patch_trading_client(mock_trading_client):
     """Auto-patch data.get_trading_client to return the mock client."""
     with patch("data.get_trading_client", return_value=mock_trading_client):
         yield mock_trading_client
+
+
+@pytest.fixture(autouse=True)
+def isolate_oms_state(tmp_path):
+    """Isolate OMS idempotency keys and OrderManager state between tests.
+
+    Without this, the persistent idempotency_keys.json file and
+    module-level OrderManager singleton leak state across tests.
+    """
+    # Redirect idempotency file to temp directory
+    tmp_keys = str(tmp_path / "idempotency_keys.json")
+    with patch("oms.order_manager._IDEMPOTENCY_FILE", tmp_keys):
+        # Also reset the OrderManager singleton if it exists
+        try:
+            import oms.order_manager as _om
+            if hasattr(_om, "_instance"):
+                _om._instance = None
+        except Exception:
+            pass
+        yield

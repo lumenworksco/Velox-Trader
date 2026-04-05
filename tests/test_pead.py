@@ -58,7 +58,7 @@ class TestPEADScan:
         assert sig.entry_price == 150.0
 
     def test_scan_long_take_profit_and_stop_loss(self):
-        """Long signal has correct TP (+5%) and SL (-3%)."""
+        """Long signal has correct TP (+5%) and SL (-2%)."""
         strat = PEADStrategy()
         surprise = _mock_surprise("AAPL", surprise_pct=10.0, volume_ratio=2.5,
                                   gap_pct=3.0, current_price=100.0)
@@ -66,7 +66,7 @@ class TestPEADScan:
             signals = strat.scan(SCAN_TIME, "NORMAL")
         sig = signals[0]
         assert sig.take_profit == 105.0   # 100 * 1.05
-        assert sig.stop_loss == 97.0      # 100 * 0.97
+        assert sig.stop_loss == 98.0      # 100 * (1 - PEAD_STOP_LOSS) = 100 * 0.98
 
     def test_scan_short_signal_on_negative_surprise(self):
         """scan() returns short Signal for negative surprise with gap down."""
@@ -80,12 +80,13 @@ class TestPEADScan:
         sig = signals[0]
         assert sig.side == "sell"
         assert sig.take_profit == 190.0   # 200 * 0.95
-        assert sig.stop_loss == 206.0     # 200 * 1.03
+        assert sig.stop_loss == 204.0     # 200 * (1 + PEAD_STOP_LOSS) = 200 * 1.02
 
     def test_scan_filters_small_surprise(self):
-        """scan() filters out surprises below PEAD_MIN_SURPRISE_PCT (5%)."""
+        """scan() filters out surprises below PEAD_MIN_SURPRISE_PCT (3%)."""
         strat = PEADStrategy()
-        surprise = _mock_surprise("AAPL", surprise_pct=3.0, volume_ratio=3.0,
+        # 2% surprise is below the 3% threshold → should be filtered
+        surprise = _mock_surprise("AAPL", surprise_pct=2.0, volume_ratio=3.0,
                                   gap_pct=1.0, current_price=150.0)
         with patch.object(strat, "_get_earnings_surprises", return_value=[surprise]):
             signals = strat.scan(SCAN_TIME, "NORMAL")
