@@ -76,10 +76,14 @@ def compute_zscore(current_price: float, mu: float, sigma: float) -> float:
 
     Positive z-score = price above mean (potential short)
     Negative z-score = price below mean (potential long)
+
+    V12 FINAL: Clips to [-5, 5] to prevent extreme signals, and guards
+    against near-zero sigma producing infinite z-scores.
     """
-    if sigma <= 0:
+    if sigma < 1e-8:
         return 0.0
-    return (current_price - mu) / sigma
+    z = (current_price - mu) / sigma
+    return max(-5.0, min(5.0, z))
 
 
 def compute_zscore_series(prices: pd.Series, mu: float, sigma: float) -> pd.Series:

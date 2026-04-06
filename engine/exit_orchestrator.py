@@ -525,7 +525,7 @@ class ExitOrchestrator:
         # V12 FINAL: Strategy-specific profit tier thresholds
         strategy = getattr(trade, "strategy", "")
         _TIER_THRESHOLDS = {
-            "STAT_MR":       (0.004, 0.007),   # 0.4% partial, 0.7% full (MR captures overshoot)
+            "STAT_MR":       (0.008, 0.015),   # 0.8% partial, 1.5% full (MR moves avg 1-2%)
             "VWAP":          (0.006, 0.010),   # 0.6% partial, 1.0% full
             "KALMAN_PAIRS":  (0.010, 0.015),   # 1.0% partial, 1.5% full
             "ORB":           (0.012, 0.020),   # 1.2% partial, 2.0% full (breakout needs room)

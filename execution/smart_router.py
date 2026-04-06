@@ -218,10 +218,12 @@ class SmartOrderRouter:
             reason += f" | TWAP {twap_slices} slices (size/ADV={size_ratio:.1%})"
 
         # V11.2: Mid-quote improvement for liquid symbols
-        # If spread is tight (< 5 bps) and urgency is not critical, try mid-quote
+        # If spread is tight (< 5 bps) and urgency is not critical/high, try mid-quote
         # limit for 30s before escalating to market.
+        # V12 FINAL: Don't apply mid-quote improvement to ORB breakouts or momentum
+        # strategies — HIGH/CRITICAL urgency needs immediate aggressive fills.
         is_liquid = spread_bps < 5 and market_data.adv > 500_000
-        if is_liquid and order_type not in (OrderTypeChoice.MARKET,) and urgency != UrgencyLevel.CRITICAL:
+        if is_liquid and order_type not in (OrderTypeChoice.MARKET,) and urgency not in (UrgencyLevel.HIGH, UrgencyLevel.CRITICAL):
             order_type = OrderTypeChoice.LIMIT_PASSIVE
             limit_price = round(market_data.mid, 2)
             reason += " | mid-quote improvement (30s before fallback)"

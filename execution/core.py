@@ -187,10 +187,10 @@ def _chase_unfilled_order(
 ) -> None:
     """V12 7.2: Background chase logic for unfilled limit orders.
 
-    V12 AUDIT: Tightened chase schedule to reduce latency:
-    - After 15s unfilled: amend price to mid-quote (using cached spread, no fresh API call).
-    - After 30s still unfilled: convert to market order (cancel + resubmit).
-    - After 45s still unfilled: cancel entirely.
+    V12 FINAL: Tightened chase schedule to reduce latency:
+    - After 10s unfilled: amend price to mid-quote (using cached spread, no fresh API call).
+    - After 20s still unfilled: convert to market order (cancel + resubmit).
+    - After 30s still unfilled: cancel entirely.
 
     Runs in a daemon thread; fail-open on all errors.
     """
@@ -205,12 +205,12 @@ def _chase_unfilled_order(
     try:
         while True:
             elapsed = time.monotonic() - chase_start
-            if elapsed > 45:
-                # 45s: cancel entirely
+            if elapsed > 30:
+                # 30s: cancel entirely
                 try:
                     client.cancel_order_by_id(current_order_id)
                     logger.warning(
-                        f"V12 7.2: Chase timeout 45s — cancelled order "
+                        f"V12 7.2: Chase timeout 30s — cancelled order "
                         f"{current_order_id} for {signal.symbol}"
                     )
                 except Exception as ce:
@@ -235,8 +235,8 @@ def _chase_unfilled_order(
                 )
                 break
 
-            if elapsed > 30 and not converted:
-                # 30s: convert to market order (cancel limit + submit market)
+            if elapsed > 20 and not converted:
+                # 20s: convert to market order (cancel limit + submit market)
                 try:
                     client.cancel_order_by_id(current_order_id)
                     side = OrderSide.BUY if signal.side == "buy" else OrderSide.SELL
@@ -254,7 +254,7 @@ def _chase_unfilled_order(
                     converted = True
                     current_order_id = str(mkt_order.id)
                     logger.info(
-                        f"V12 7.2: Chase 30s — converted {signal.symbol} to market "
+                        f"V12 7.2: Chase 20s — converted {signal.symbol} to market "
                         f"order {current_order_id}"
                     )
                 except Exception as e:
@@ -264,8 +264,8 @@ def _chase_unfilled_order(
                     )
                     converted = True  # Don't retry conversion
 
-            elif elapsed > 15 and not amended and not converted:
-                # 15s: amend price to mid-quote using cached spread (no fresh API call)
+            elif elapsed > 10 and not amended and not converted:
+                # 10s: amend price to mid-quote using cached spread (no fresh API call)
                 try:
                     from data import quote_cache  # V12 AUDIT: use cached quotes, not live fetch
                     cached = quote_cache.get(signal.symbol)
@@ -284,7 +284,7 @@ def _chase_unfilled_order(
                             )
                             amended = True
                             logger.info(
-                                f"V12 7.2: Chase 15s — amended {signal.symbol} "
+                                f"V12 7.2: Chase 10s — amended {signal.symbol} "
                                 f"limit to cached mid={new_price}"
                             )
                         else:
@@ -775,6 +775,10 @@ def _submit_order(signal: Signal, qty: int, client=None):
 
     elif signal.strategy in ("MICRO_MOM", "BETA_HEDGE"):
         # Momentum / hedge: market order, speed matters
+        # V12 FINAL: IOC would be ideal for immediate fill, but Alpaca
+        # bracket orders apply a single TIF to all legs — IOC would cancel
+        # the take-profit/stop-loss legs if the parent fills partially.
+        # Keep DAY so bracket children persist as intended.
         return client.submit_order(
             MarketOrderRequest(
                 symbol=signal.symbol,

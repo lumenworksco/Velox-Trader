@@ -62,12 +62,12 @@ class _ModelWeights:
     """
     intercept: float = 0.5
     w_spread: float = 0.3         # Wider spread -> more slippage
-    w_volatility: float = 15.0    # Higher vol -> more slippage
+    w_volatility: float = 5.0     # V12 FINAL: was 15.0, severely overestimated vol impact
     w_size: float = 2.0           # Larger size -> more slippage (log scale)
-    w_vix: float = 0.05           # Higher VIX -> more slippage
+    w_vix: float = 0.15           # V12 FINAL: was 0.05, VIX impact was underweighted
     w_opening: float = 2.0        # Opening auction premium
     w_closing: float = 1.5        # Closing auction premium
-    w_market_order: float = 1.0   # Market orders slip more than limits
+    w_market_order: float = 3.0   # V12 FINAL: was 1.0, market orders cost more than 1 bps
 
 
 class SlippageModel:

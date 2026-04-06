@@ -1514,15 +1514,27 @@ def main():
                                 logger.warning(f"V11.3 intraday controls blocking signals: {irc_reason}")
                                 signals = []  # Block all new entries
                         if signals:
+                            # V12 FINAL: Wire IntradayVolRegime sizing multiplier
+                            _vol_regime_mult = 1.0
+                            if _intraday_vol_regime:
+                                try:
+                                    _vol_regime_mult = _intraday_vol_regime.get_sizing_multiplier()
+                                except Exception:
+                                    _vol_regime_mult = 1.0
                             process_signals(
                                 signals, risk, regime, current,
                                 vol_engine, pnl_lock, ws_monitor,
                                 news_sentiment, llm_scorer,
                                 regime_detector, cross_asset_monitor,
                                 var_monitor, corr_limiter,
+                                extra_sizing_mult=_vol_regime_mult,
                             )
 
                         # 5. Check strategy exits (always runs — uses cached prices if feed down)
+                        # V12 FINAL: Snapshot closed trades count before exit processing
+                        # so we can feed WinStreakTracker with newly closed trades
+                        _closed_before = len(risk.closed_trades)
+
                         # V12 FINAL: ExitOrchestrator is primary; legacy is fallback
                         if _exit_orchestrator is not None:
                             try:
@@ -1586,6 +1598,14 @@ def main():
                                         handle_strategy_exits(adv_exits, risk, current, ws_monitor)
                                 except Exception as e:
                                     logger.error("Advanced exits failed: %s", e)
+
+                        # V12 FINAL: Wire WinStreakTracker — record each newly closed trade
+                        if _win_streak_tracker:
+                            try:
+                                for _ct in risk.closed_trades[_closed_before:]:
+                                    _win_streak_tracker.record_trade(_ct.pnl > 0)
+                            except Exception:
+                                pass
 
                         # 6. Beta neutralization
                         run_beta_neutralization(

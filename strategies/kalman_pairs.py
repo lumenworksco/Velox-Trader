@@ -393,7 +393,7 @@ class KalmanPairsTrader:
         # CRIT-010: Soft-clip hedge ratio — V11.3 T5 widened from [0.1, 10.0]
         # The old tight clamp biased spread calculations when true hedge ratios
         # were outside range, creating false high-z signals.
-        theta[0] = np.clip(theta[0], 0.01, 100.0)
+        theta[0] = np.clip(theta[0], 0.2, 5.0)
         P = P - np.outer(K, x) @ P
 
         # V10: Enforce P symmetry and positive semi-definiteness

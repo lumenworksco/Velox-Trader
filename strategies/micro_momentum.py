@@ -133,8 +133,11 @@ class IntradayMicroMomentum:
                 return False
             price_move_pct = (close.iloc[-1] - close.iloc[-2]) / close.iloc[-2]
 
+            # Scale price move threshold by volume ratio — larger spikes
+            # require proportionally smaller price moves to trigger
+            min_move = config.MICRO_SPY_MIN_MOVE_PCT * (vol_ratio / 3.0)
             if (vol_ratio >= config.MICRO_SPY_VOL_SPIKE_MULT
-                    and abs(price_move_pct) >= config.MICRO_SPY_MIN_MOVE_PCT):
+                    and abs(price_move_pct) >= min_move):
 
                 self._event_active = True
                 self._event_direction = "up" if price_move_pct > 0 else "down"

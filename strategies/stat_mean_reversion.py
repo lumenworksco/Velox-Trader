@@ -248,6 +248,10 @@ class StatMeanReversion:
                 if (zscore < -mr_entry_z
                         and price < vwap):
 
+                    # RSI gate: only enter long if RSI confirms oversold
+                    if rsi > config.MR_RSI_OVERSOLD:
+                        continue
+
                     # Target: revert to z=MR_ZSCORE_EXIT_FULL (near mean)
                     # BUG-021: Use price_sigma (rolling std of levels) not OU sigma
                     # (std of changes) for meaningful stop/target distances
@@ -286,6 +290,10 @@ class StatMeanReversion:
                       and regime != "BULLISH"
                       and config.ALLOW_SHORT
                       and symbol not in config.NO_SHORT_SYMBOLS):
+
+                    # RSI gate: only enter short if RSI confirms overbought
+                    if rsi < config.MR_RSI_OVERBOUGHT:
+                        continue
 
                     # BUG-021: Use price_sigma for meaningful distances
                     target_price = mu - config.MR_ZSCORE_EXIT_FULL * price_sigma

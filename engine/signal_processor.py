@@ -7,6 +7,7 @@ Integrates:
 """
 
 import logging
+import math
 import threading
 import time as _time
 from datetime import datetime, timedelta
@@ -755,6 +756,7 @@ def process_signals(
     cross_asset_monitor=None,
     var_monitor=None,
     corr_limiter=None,
+    extra_sizing_mult: float = 1.0,
 ):
     """Process signals: check filters, risk, size, and submit orders.
 
@@ -778,12 +780,14 @@ def process_signals(
         sell_count = len(signals) - buy_count
         total = len(signals)
         max_direction_pct = max(buy_count, sell_count) / total
-        if max_direction_pct > 0.85:
-            breadth_mult = 0.5
+        # V12 FINAL: Gradual breadth curve instead of 50% cliff
+        if max_direction_pct > 0.70:
+            breadth_mult = max(0.7, 1.0 - (max_direction_pct - 0.70) * 1.0)
+            # At 70% → 1.0x, at 85% → 0.85x, at 100% → 0.70x
             logger.info(
-                "V11.5: Breadth filter active — %.0f%% signals in one direction "
-                "(buy=%d, sell=%d), reducing sizes by 50%%",
-                max_direction_pct * 100, buy_count, sell_count,
+                "V12 FINAL: Breadth filter active — %.0f%% signals in one direction "
+                "(buy=%d, sell=%d), breadth_mult=%.2f",
+                max_direction_pct * 100, buy_count, sell_count, breadth_mult,
             )
 
     # Group pairs signals by pair_id for atomic processing
@@ -837,7 +841,7 @@ def process_signals(
         _process_single_signal(signal, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
                                var_monitor, corr_limiter, batch_accepted=_batch_accepted_symbols,
-                               breadth_mult=breadth_mult)
+                               breadth_mult=breadth_mult, extra_sizing_mult=extra_sizing_mult)
         # Track if a new position was actually opened
         if signal.symbol in risk.open_trades and signal.symbol not in prev_open:
             _new_entries_this_scan += 1
@@ -865,7 +869,8 @@ def process_signals(
                 first_sig, second_sig = pair_signals[0], pair_signals[1]
                 _process_single_signal(first_sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                        news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
-                                       var_monitor, corr_limiter, breadth_mult=breadth_mult)
+                                       var_monitor, corr_limiter, breadth_mult=breadth_mult,
+                                       extra_sizing_mult=extra_sizing_mult)
 
                 if first_sig.symbol in risk.open_trades:
                     # T1-001: Track leg 1 order ID before submitting leg 2
@@ -874,7 +879,8 @@ def process_signals(
 
                     _process_single_signal(second_sig, risk, regime, now, vol_engine, pnl_lock, ws_monitor,
                                            news_sentiment, llm_scorer, regime_detector, cross_asset_monitor,
-                                           var_monitor, corr_limiter, breadth_mult=breadth_mult)
+                                           var_monitor, corr_limiter, breadth_mult=breadth_mult,
+                                           extra_sizing_mult=extra_sizing_mult)
 
                     # T1-001: If leg 2 failed (rejected or not in open_trades), roll back leg 1
                     if second_sig.symbol not in risk.open_trades:
@@ -909,6 +915,7 @@ def _process_single_signal(
     corr_limiter=None,
     batch_accepted: list[str] | None = None,
     breadth_mult: float = 1.0,
+    extra_sizing_mult: float = 1.0,
 ):
     """Process a single signal through filters and submit if valid."""
     skip_reason = ""
@@ -1004,13 +1011,8 @@ def _process_single_signal(
         except Exception:
             pass  # Fail-open
 
-    # 3. Correlation filter (skip for pairs — inherently correlated)
-    if signal.strategy != "KALMAN_PAIRS":
-        open_symbols = list(risk.open_trades.keys())
-        if open_symbols and is_too_correlated(signal.symbol, open_symbols):
-            skip_reason = "high_correlation"
-            database.log_signal(now, signal.symbol, signal.strategy, signal.side, False, skip_reason)
-            return
+    # 3. Correlation filter — REMOVED (V12 FINAL): redundant with V10 corr_limiter at step 5a
+    # which also handles batch-aware concentration checking.
 
     # 4. Short selling pre-check
     if signal.side == "sell":
@@ -1206,20 +1208,14 @@ def _process_single_signal(
                 prediction = model.predict(feat_df)
                 confidence = float(prediction[0]) if len(prediction) > 0 else 0.5
 
-            # V11.3 T9: ML confidence gating
-            # < 0.35 → skip signal (strong ML disagreement)
-            # 0.35-0.65 → neutral (no adjustment)
-            # > 0.65 → boost conviction 10-20%
-            if confidence < 0.35:
-                logger.info(
-                    f"V11.3 T9: ML rejects {signal.symbol} — confidence={confidence:.2f} < 0.35"
-                )
-                return None
-            elif confidence > 0.65:
-                ml_conf_mult = 1.0 + (confidence - 0.65) * 0.57  # Maps 0.65→1.0, 1.0→1.2
-                ml_conf_mult = min(ml_conf_mult, 1.2)
-            else:
-                ml_conf_mult = 1.0  # Neutral zone
+            # V12 FINAL: Soft ML gate — don't hard-reject, scale position instead
+            if confidence < 0.15:
+                # Only hard-reject at extremely low confidence
+                logger.info("V12 FINAL: ML hard reject %s — confidence=%.2f < 0.15", signal.symbol, confidence)
+                return
+            # Sigmoid mapping: [0, 1] -> [0.5, 1.5]
+            sigmoid_conf = 1.0 / (1.0 + math.exp(-8 * (confidence - 0.5)))
+            ml_conf_mult = 0.6 + sigmoid_conf * 0.9  # Range [0.6, 1.5]
     except Exception as e:
         logger.debug("WIRE-002: ML prediction failed for %s (fail-open): %s", signal.symbol, e)
         ml_conf_mult = 1.0
@@ -1393,10 +1389,14 @@ def _process_single_signal(
     # Apply VaR budget as a direct multiplier (risk management, not conviction)
     # and news_mult (already filtered for 0.0, so always 1.0 here)
     # T8: data quality multiplier reduces size on stale data
-    combined_mult = conviction_score * var_mult * news_mult * _data_quality_mult
-    # Bound to [0.4, 1.5] — prevents both over-sizing and excessive reduction
+    # V12 FINAL: Prevent cascading multiplication death — floor each soft filter
+    combined_mult = conviction_score * max(0.6, var_mult) * max(0.7, news_mult) * max(0.7, _data_quality_mult)
     combined_mult = max(0.4, min(combined_mult, 1.5))
     qty = int(qty * combined_mult)
+    # V12 FINAL: Apply extra sizing multiplier (e.g. IntradayVolRegime from profit_maximizer)
+    if extra_sizing_mult != 1.0:
+        qty = max(1, int(qty * extra_sizing_mult))
+        logger.debug("V12 FINAL: extra_sizing_mult=%.2f applied → qty=%d", extra_sizing_mult, qty)
     logger.debug(
         "V11.3 conviction: %s conviction=%.2f var=%.2f → combined=%.2f qty=%d",
         signal.symbol, conviction_score, var_mult, combined_mult, qty,
