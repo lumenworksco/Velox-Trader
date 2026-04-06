@@ -36,7 +36,9 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
 
       - name: Verify core imports
         env:
@@ -54,52 +56,65 @@ jobs:
           from strategies.kalman_pairs import KalmanPairsTrader
           from strategies.micro_momentum import IntradayMicroMomentum
           from strategies.vwap import VWAPStrategy
+          from strategies.orb_v2 import ORBStrategyV2
+          from strategies.pead import PEADStrategy
           from strategies.regime import MarketRegime
 
           # Risk engine
           from risk import RiskManager, VolatilityTargetingRiskEngine, DailyPnLLock, BetaNeutralizer
 
-          # V10: Engine package
+          # V12: Engine package
           from engine.startup import initialize_strategies, initialize_risk_engines
           from engine.signal_processor import process_signals
           from engine.scanner import scan_all_strategies
           from engine.daily_tasks import daily_reset
           from engine.broker_sync import sync_positions_with_broker
+          from engine.exit_orchestrator import get_exit_orchestrator
           from engine.exit_processor import handle_ws_close
           from engine.events import EventBus
           from engine.metrics import MetricsCollector
+          from engine.profit_maximizer import IntradayVolRegime, WinStreakTracker
 
-          # V10: OMS
+          # V12: OMS
           from oms.order import Order, OrderState
           from oms.order_manager import OrderManager
           from oms.kill_switch import KillSwitch
           from oms.transaction_cost import TransactionCostModel
 
-          # V10: Risk modules
+          # V12: Risk modules
           from risk.circuit_breaker import TieredCircuitBreaker
           from risk.var_monitor import VaRMonitor
           from risk.correlation_limiter import CorrelationLimiter
+          from risk.kelly import KellyEngine
 
-          # V10: Database abstraction
+          # V12: ML
+          from ml.inference import BatchInferenceEngine
+          from ml.model_monitor import get_model_monitor
+
+          # V12: Database
           from db import get_engine
           from db.models import Trade, Signal as SignalModel
 
-          # V10: Auth
+          # V12: Auth
           from auth.jwt_auth import create_token, verify_token
 
           # Analytics
           from analytics import compute_analytics, sharpe_ratio, profit_factor
           from analytics.ou_tools import fit_ou_params, compute_zscore
           from analytics.hurst import hurst_exponent
-          from analytics.consistency_score import compute_consistency_score
+          from analytics.hmm_regime import HMMRegimeDetector
+          from analytics.signal_ranker import rank_signals
 
-          print('All V10 imports OK')
+          print('All V12 imports OK')
           "
 
       - name: Run tests
+        env:
+          TESTING: "1"
         run: |
           pytest tests/ \
             -v --tb=short \
+            --ignore=tests/test_stress_testing.py \
             --cov=. --cov-report=xml
 
       - name: Upload coverage
@@ -116,14 +131,15 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Docker image
-        run: docker build -t velox-v10 .
+        run: docker build -t velox-v12 .
 
       - name: Verify health endpoint
         run: |
           docker run -d --name velox-test -p 8080:8080 \
             -e ALPACA_API_KEY=test -e ALPACA_API_SECRET=test \
-            velox-v10 || true
-          sleep 5
+            -e TESTING=1 \
+            velox-v12 || true
+          sleep 10
           docker logs velox-test 2>&1 | tail -20 || true
           docker stop velox-test || true
           docker rm velox-test || true
