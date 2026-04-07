@@ -246,11 +246,11 @@ Date: ________________________________________________
 
 ## Exhibit A: Software Description
 
-- **Product:** [Trading Bot Name / Version]
-- **Components included:** Source code, configuration files, documentation, trained ML models
+- **Product:** Velox V12 — Autonomous Algorithmic Trading System
+- **Components included:** Source code, configuration files, documentation, trained ML models, Docker deployment stack, onboarding scripts
 - **Delivery method:** [e.g., Private repository access, encrypted archive, etc.]
-- **Supported platforms:** [e.g., macOS, Linux, Windows]
-- **Dependencies:** Python 3.x, Alpaca API account, and other dependencies as documented
+- **Supported platforms:** macOS 13+, Ubuntu 22.04+, any Linux with Docker
+- **Dependencies:** Python 3.12+, Docker, Alpaca API account (free), and other dependencies as documented in requirements.txt
 
 ---
 
