@@ -1,6 +1,6 @@
 # Velox V12 — Autonomous Algorithmic Trading System
 
-![CI](https://github.com/iPwnds/Velox/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/lumenworksco/Velox/actions/workflows/ci.yml/badge.svg)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
@@ -15,7 +15,7 @@ A production-grade autonomous equity trading system built on the Alpaca API. Fea
 ### Option 1: Docker (Recommended)
 
 ```bash
-git clone https://github.com/iPwnds/Velox.git
+git clone https://github.com/lumenworksco/Velox.git
 cd Velox
 cp .env.example .env
 # Edit .env with your Alpaca API keys
