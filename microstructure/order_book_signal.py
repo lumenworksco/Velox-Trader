@@ -313,7 +313,7 @@ class OrderImbalanceModel:
         feat_mean = np.mean(X, axis=0)
         X_norm = (X - feat_mean) / feat_std
 
-        for epoch in range(epochs):
+        for _epoch in range(epochs):
             # Forward pass
             z = X_norm @ weights + bias
             preds = 1.0 / (1.0 + np.exp(-np.clip(z, -500, 500)))

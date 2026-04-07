@@ -282,7 +282,7 @@ class ModelExplainer:
         changed_features: Dict[int, float] = {}  # idx -> cumulative delta
 
         current_pred = original_pred
-        for iteration in range(max_iterations):
+        for _iteration in range(max_iterations):
             gap = target - current_pred
             if abs(gap) < 1e-6:
                 break

@@ -1500,12 +1500,7 @@ async def audit_trail_query(
 
         # Verify hash chain integrity for the returned window
         chain_valid = True
-        if len(events) >= 2:
-            # Events are in DESC order; reverse for chain check
-            for i in range(len(events) - 1, 0, -1):
-                # Chain integrity is verified at write time;
-                # here we just note the chain exists
-                pass
+        # Chain integrity is verified at write time; no runtime check needed
 
         return {
             "events": events,

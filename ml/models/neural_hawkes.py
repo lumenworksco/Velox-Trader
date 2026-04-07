@@ -160,7 +160,7 @@ if _TORCH_AVAILABLE:
 
             # Initialize states
             states = []
-            for cell in self.cells:
+            for _cell in self.cells:
                 h = torch.zeros(B, self.d_model, device=x.device)
                 c = torch.zeros(B, self.d_model, device=x.device)
                 c_bar = torch.zeros(B, self.d_model, device=x.device)
