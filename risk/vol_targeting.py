@@ -175,7 +175,9 @@ class VolatilityTargetingRiskEngine:
         # even when within the portfolio max-position limit.  Halve size
         # for very volatile stocks so a single adverse move doesn't wipe
         # out more than the intended risk budget.
-        if symbol and entry_price > 0:
+        # V12 HOTFIX (CodeQL): entry_price > 0 is already guaranteed by the
+        # early return at line 115, so the extra comparison is redundant.
+        if symbol:
             try:
                 # BUG-FIX: Use intraday 5-min bars (last 3 hours) for ATR cap —
                 # daily bars miss intraday volatility spikes (e.g. LYFT at 4.2%)
