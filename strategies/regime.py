@@ -80,12 +80,17 @@ class MarketRegime:
             if vix > 30:
                 self.regime = "BEARISH"
                 self.last_check = now
-                # Also update HMM state if available
+                # Also update HMM state if available.
+                # V12 HOTFIX (CodeQL): explicit fail-open — HMM is optional,
+                # so a missing module should not break the VIX override path.
                 try:
                     from analytics.hmm_regime import MarketRegimeState
                     self.hmm_regime = MarketRegimeState.HIGH_VOL_BEAR
-                except ImportError:
-                    pass
+                except ImportError as e:
+                    logger.debug(
+                        "HMM MarketRegimeState unavailable during VIX override; "
+                        "skipping hmm_regime sync: %s", e,
+                    )
                 logger.warning(
                     "VIX override: VIX=%.1f > 30 — forcing regime to BEARISH",
                     vix,
